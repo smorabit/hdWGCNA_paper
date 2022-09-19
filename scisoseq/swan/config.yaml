@@ -1,0 +1,17 @@
+ref:
+  vM21:
+    link: https://www.encodeproject.org/files/gencode.vM21.primary_assembly.annotation_UCSC_names/@@download/gencode.vM21.primary_assembly.annotation_UCSC_names.gtf.gz
+    gz: refs/gencode_vM21.gtf.gz
+    gtf: refs/gencode_vM21.gtf
+    g_info: refs/cerberus/vM21_gene_metadata.tsv
+sciso:
+  struct: IsoID_TranscriptID_TSS_Intron_PolyA
+  gtf: sciso.gtf
+  ab: sniso_counts.tsv
+  raw_meta: sniso_cell_meta.tsv
+  meta: sciso_meta.tsv
+  mm_genes: multimod_genes.csv
+  sg: swan.p
+  # fig:
+  #     browser:
+  #     swan: 

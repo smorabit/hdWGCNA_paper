@@ -1,0 +1,92 @@
+import os
+import sys
+import pandas as pd
+
+p = os.getcwd()
+sys.path.append(p)
+
+from utils import *
+
+configfile: "configs/config.yaml"
+
+rule all:
+    input:
+        config['sciso']['sg'],
+        # get_multimod_genes()
+
+rule dl_vM21:
+    params:
+        link = config['ref']['vM21']['link']
+    resources:
+        mem_gb = 4,
+        threads = 1
+    output:
+        gz = config['ref']['vM21']['gz']
+    shell:
+        "wget -O {output.gz} {params.link}"
+
+rule gunzip_vM21:
+    input:
+        gz = config['ref']['vM21']['gz']
+    resources:
+        mem_gb = 4,
+        threads = 1
+    output:
+        gtf = config['ref']['vM21']['gtf']
+    shell:
+        "gunzip {input.gz}"
+
+rule cerberus_get_g_info_vM21:
+    input:
+        gtf = config['ref']['vM21']['gtf'],
+    resources:
+        mem_gb = 56,
+        threads = 1
+    output:
+        o = config['ref']['vM21']['g_info']
+    run:
+        get_gene_info(input.gtf, output.o)
+
+rule iq_struct_to_gtf:
+    input:
+        struct = config['sciso']['struct'],
+        g_meta = config['ref']['vM21']['g_info']
+    output:
+        gtf = config['sciso']['gtf']
+    run:
+        isoquant_struct_to_gtf(input.struct,
+                               input.g_meta,
+                               output.gtf)
+rule fmt_meta:
+    input:
+        raw = config['sciso']['raw_meta']
+    output:
+        meta = config['sciso']['meta']
+    run:
+        df = pd.read_csv(input.raw, sep=' ')
+        df.reset_index(inplace=True)
+        df.rename({'index': 'dataset'}, axis=1, inplace=True)
+        df.to_csv(output.meta, sep='\t', index=False)
+
+rule make_sg:
+    input:
+        ref = config['ref']['vM21']['gtf'],
+        annot = config['sciso']['gtf'],
+        ab = config['sciso']['ab'],
+        meta = config['sciso']['meta']
+    output:
+        sg = config['sciso']['sg']
+    run:
+        make_sg(input.ref, input.annot,
+                input.ab, input.meta,
+                output.sg)
+
+# rule swan_reports:
+#     input:
+#         sg = config['sciso']['sg'],
+#         mm_genes = config['sciso']['mm_genes']
+#     output:
+#         b = config['sciso']['fig']['browser']
+#         # b = expand(config['sciso']['fig']['browser'], get_multimod_genes)
+#     run:
+#         sg = swan.read(input.sg)
