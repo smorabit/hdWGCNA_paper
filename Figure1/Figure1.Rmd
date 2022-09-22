@@ -1,0 +1,477 @@
+
+Load required libraries
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(WGCNA)
+library(Matrix)
+library(viridis)
+library(harmony)
+library(RColorBrewer)
+library(ggpubr)
+library(tictoc)
+library(RColorBrewer)
+library(Hmisc)
+library(corrplot)
+library(enrichR)
+library(GeneOverlap)
+library(grid)
+library(gridExtra)
+library(igraph)
+library(ggrepel)
+library(hdWGCNA)
+enableWGCNAThreads(nThreads = 8)
+theme_set(theme_cowplot())
+set.seed(12345)
+
+# Custom ST plotting functions
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+# output directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+```
+
+Run network analysis iteratively for each major cell type
+
+```{r eval=FALSE}
+
+# load the processed Seurat object for the Zhou et al dataset
+# with only control brain samples
+seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/scWGCNA/data/Zhou_control_scWGCNA.rds')
+
+# get list of each cell type
+groups <- as.character(unique(seurat_obj$cell_type))
+
+for(i in 1:length(groups)){
+
+  print(i)
+  cur_group <- as.character(groups[i])
+
+  # only run metacell aggregation one time
+  if(i == 1){
+    print('Setting up and running metacells')
+    # setup training data for scWGCNA:
+    seurat_obj <- SetupForWGCNA(
+      seurat_obj,
+      gene_select = "fraction",
+      fraction = 0.05,
+      wgcna_name = cur_group
+    )
+
+    # construct metacells:
+    seurat_obj <- MetacellsByGroups(
+      seurat_obj = seurat_obj,
+      group.by = c("cell_type", "Sample"),
+      k = 25,
+      max_shared = 12,
+      reduction = 'harmony',
+      ident.group = 'cell_type'
+    )
+
+    seurat_obj <- NormalizeMetacells(seurat_obj)
+
+  } else{
+
+    seurat_obj  <- SetupForWGCNA(
+      seurat_obj,
+      gene_select = "fraction",
+      fraction = 0.05,
+      wgcna_name = cur_group,
+      metacell_location = groups[1]
+    )
+  }
+
+  # setup expression matrix
+  seurat_obj <- SetDatExpr(
+    seurat_obj,
+    group.by='cell_type',
+    group_name = cur_group
+  )
+
+  # construct network
+  seurat_obj <- TestSoftPowers(seurat_obj)
+  seurat_obj <- ConstructNetwork(seurat_obj, tom_name = cur_group)
+  seurat_obj <- ModuleEigengenes(seurat_obj, group.by.vars="Sample", wgcna_name = cur_group)
+  seurat_obj <- ModuleConnectivity(seurat_obj, group.by='cell_type', group_name = cur_group, wgcna_name = cur_group)
+
+  # rename the modules
+  seurat_obj <- ResetModuleNames(
+    seurat_obj,
+    new_name = paste0(cur_group, '-M'),
+    wgcna_name=cur_group
+  )
+
+}
+
+# save the output
+saveRDS(seurat_obj, file=paste0(data_dir, 'Zhou_scWGCNA_all_celltypes.rds'))
+
+```
+
+
+Write the module assignments to file
+
+```{r eval=FALSE}
+
+groups <- as.character(unique(seurat_obj$cell_type))
+modules <- do.call(rbind, lapply(groups, function(x){
+  m <- GetModules(seurat_obj, wgcna_name=x) %>% subset(module != 'grey')
+  m$group <- x
+  m %>% dplyr::select(c(gene_name, module, color, group))
+}))
+
+write.csv(modules, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'brain_modules.csv'))
+
+```
+
+
+Run enrichR pathway enrichment in each cell type
+
+```{r eval=FALSE}
+
+library(enrichR)
+
+dbs <-c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021','LINCS_L1000_Chem_Pert_up','LINCS_L1000_Chem_Pert_down', 'WikiPathway_2021_Human', 'KEGG_2021_Human')
+
+# compute GO terms:
+groups <- as.character(unique(seurat_obj$cell_type))
+enrich_list <- list()
+for(cur_group in groups){
+  seurat_obj <- RunEnrichr(seurat_obj, dbs=dbs, wgcna_name=cur_group)
+  enrichr_df <- GetEnrichrTable(seurat_obj, wgcna_name=cur_group) %>% subset(P.value < 0.05)
+  enrichr_df$cell_type <- cur_group
+  enrich_list[[cur_group]] <- enrichr_df
+}
+
+enrich_df <- do.call(rbind, enrich_list)
+write.table(enrichr_df, quote=FALSE, sep='\t', row.names=FALSE, file=paste0(data_dir, 'brain_enrichr.tsv'))
+
+
+```
+
+Network visualizations and module eigengene plots
+
+
+```{r eval=FALSE}
+
+library(reshape2)
+library(igraph)
+
+groups <- as.character(unique(seurat_obj$cell_type))
+
+# plot the dendrograms
+pdf(paste0(fig_dir, "dendro.pdf"),height=3, width=6)
+for(cur_group in groups){
+    PlotDendrogram(seurat_obj, main=paste0(cur_group, ' Dendrogram'), wgcna_name=cur_group)
+}
+dev.off()
+
+# module network plot
+for(cur_group in groups){
+  ModuleNetworkPlot(
+    seurat_obj,
+    mods = "all",
+    outdir = paste0(fig_dir, cur_group, '_hubNetworks/'),
+    wgcna_name = cur_group
+  )
+}
+
+# module umap plot
+plot_list <- list()
+for(cur_group in groups){
+
+  print(cur_group)
+
+  # compute the module UMAPs
+  seurat_obj <- RunModuleUMAP(
+    seurat_obj,
+    n_hubs = 5,
+    n_neighbors=10,
+    min_dist=0.3,
+    spread=2,
+    wgcna_name = cur_group,
+    target_weight=0.1,
+    supervised=TRUE
+  )
+
+  # get the hub gene UMAP table from the seurat object
+  umap_df <- GetModuleUMAP(seurat_obj, wgcna_name=cur_group)
+
+  # plot with ggplot
+  plot_df <- umap_df
+
+  # compute coordinates for cluster labels
+  centroid_df <- data.frame()
+  for(cur_cluster in unique(plot_df[['module']])){
+    cur_meta <- plot_df[plot_df[['module']] == cur_cluster,]
+    df <- data.frame(
+      cluster = cur_cluster,
+      UMAP1 = mean(cur_meta$UMAP1),
+      UMAP2 = mean(cur_meta$UMAP2)
+    )
+    centroid_df <- rbind(centroid_df, df)
+  }
+
+  # plot with ggplot
+  p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
+    ggrastr::rasterise(geom_point(
+     color=umap_df$color,
+     size=umap_df$kME*2
+   ), dpi=500, scale=0.5) +
+    umap_theme() +
+    theme(
+      plot.margin = margin(0,0,0,0),
+      plot.title = element_text(hjust=0.5)
+    ) + ggtitle(cur_group) +
+    ggrepel::geom_text_repel(data = centroid_df, label=centroid_df$cluster, color='black', max.overlaps=Inf, size=3)
+
+  plot_list[[cur_group]] <- p
+
+
+  pdf(paste0(fig_dir, cur_group, '_hubgene_umap_ggplot.pdf'), width=5, height=5)
+  print(p)
+  dev.off()
+
+  hub_genes <- GetHubGenes(seurat_obj, 3, wgcna_name=cur_group)
+
+  # add annotation
+  anno_genes <- hub_genes$gene_name
+  plot_df$anno <- ifelse(plot_df$gene %in% anno_genes, umap_df$gene, '')
+
+  plot_df_anno <- subset(plot_df, anno != '')
+  p <-  plot_df %>%
+    ggplot(aes(x=UMAP1, y=UMAP2, color=module)) +
+    ggrastr::rasterise(
+      geom_point(
+        inherit.aes=FALSE,
+        data=plot_df,
+        aes(x=UMAP1, y=UMAP2, color=module),
+        color=plot_df$color,
+        size=plot_df$kME*2,
+      ), dpi=500, dpi_scale=0.5) +
+    geom_point(
+      inherit.aes = FALSE,
+      data = plot_df_anno,
+      shape=21, color='black',
+      fill=plot_df_anno$color,
+      size=plot_df_anno$kME*2,
+      aes(x=UMAP1, y=UMAP2, fill=module)
+    ) +
+    # add labels
+    ggrepel::geom_text_repel(data = centroid_df, label=centroid_df$cluster, color='black', max.overlaps=Inf, size=3, fontface='bold') +
+
+    geom_text_repel(label=plot_df$anno, max.overlaps=Inf, color='black', fontface='italic', size=2) +
+    umap_theme() + NoLegend() +
+    coord_equal() +
+    theme(
+      plot.margin = margin(0,0,0,0)
+    )
+
+  pdf(paste0(fig_dir, cur_group, '_hubgene_umap_ggplot.pdf'), width=6, height=6)
+  print(p)
+  dev.off()
+
+  # plot with igraph
+  pdf(paste0(fig_dir, cur_group,'_hubgene_umap_igraph.pdf'), width=7, height=7)
+  ModuleUMAPPlot(
+    seurat_obj,
+    edge.alpha=0.5,
+    sample_edges=TRUE,
+    keep_grey_edges=FALSE,
+    edge_prop=0.075, # taking the top 20% strongest edges in each module
+    #label_genes = label_genes,
+    label_hubs=3, # how many hub genes to plot per module?
+    wgcna_name = cur_group
+  )
+  dev.off()
+
+}
+
+pdf(paste0(fig_dir, 'hubgene_umap_ggplot_all.pdf'), width=9, height=6)
+wrap_plots(plot_list, ncol=3)
+dev.off()
+
+
+# plot the featureplots
+p_ex <- ModuleFeaturePlot(seurat_obj, order='shuffle', raster=TRUE, raster_dpi=100, alpha=1, raster_scale=0.25, wgcna_name='EX', restrict_range=FALSE)
+
+p_inh <- ModuleFeaturePlot(seurat_obj, order='shuffle', raster=TRUE, raster_dpi=100, alpha=1,raster_scale=0.25, wgcna_name='INH', restrict_range=FALSE)
+
+p_odc <- ModuleFeaturePlot(seurat_obj, order='shuffle', raster=TRUE, raster_dpi=100, alpha=1, raster_scale=0.25, wgcna_name='ODC', restrict_range=FALSE)
+
+p_opc <- ModuleFeaturePlot(seurat_obj, order='shuffle', raster=TRUE, raster_dpi=100, alpha=1, raster_scale=0.25, wgcna_name='OPC', restrict_range=FALSE)
+
+p_asc <- ModuleFeaturePlot(seurat_obj, order='shuffle', raster=TRUE, raster_dpi=100, alpha=1, raster_scale=0.25, wgcna_name='ASC', restrict_range=FALSE)
+
+p_mg <- ModuleFeaturePlot(seurat_obj, order='shuffle', raster=TRUE, raster_dpi=200, alpha=1, raster_scale=0.25, wgcna_name='MG', restrict_range=FALSE)
+
+plot_list <- c(
+  p_ex, p_inh, p_odc, p_opc, p_asc, p_mg
+)
+
+
+pdf(paste0(fig_dir, "ME_featureplots.pdf"),height=20, width=20)
+wrap_plots(plot_list, ncol=11)
+dev.off()
+
+```
+
+
+Module Preservation analysis
+
+```{r eval=FALSE}
+
+# load Morabito & Miyoshi et al 2021 dataset
+seurat_query <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/scWGCNA/data/Swarup_2021.rds')
+
+seurat_query <- ProjectModules(
+  seurat_obj = seurat_query,
+  seurat_ref = seurat_obj,
+  wgcna_name = "ODC",
+  wgcna_name_proj="ODC_projected"
+)
+
+plot_list <- ModuleFeaturePlot(seurat_query, order=TRUE, raster=TRUE, raster_dpi=400, alpha=1, restrict_range=FALSE, raster_scale=0.25)
+pdf("figures/ODC_featureplot_MEs_morabito_2021.pdf",height=10, width=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+seurat_query <- SetDatExpr(
+  seurat_query,
+  group_name = "ODC",
+  group.by = "cell_type",
+  use_metacells = FALSE,
+  assay = 'RNA'
+)
+
+seurat_query <- ModulePreservation(
+  seurat_query,
+  seurat_ref = seurat_obj,
+  name="ODC_projected",
+  wgcna_name = 'ODC_projected',
+  wgcna_name_ref = 'ODC',
+  verbose=3,
+  n_permutations=100
+)
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_query,
+  name="ODC_projected",
+  statistics = "summary",
+  label=FALSE
+)
+
+p <- plot_list[[2]] + theme(
+  axis.line.x = element_blank(),
+  axis.line.y = element_blank(),
+  panel.border = element_rect(color='black', fill=NA, size=1),
+  plot.title=element_blank()
+)
+
+pdf(paste0(fig_dir, 'ODC_module_preservation_summary_Morabito.pdf'), width=3, height=3)
+p
+dev.off()
+
+```
+
+
+Correlation of Seurat module score / UCell score and MEs:
+
+1. Subset each cell type
+2. Project modules (no harmony)
+3. Compute Seurat score
+4. Save the subset object
+
+```{r eval=FALSE}
+
+cur_group <- 'ASC'
+
+groups <- c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC')
+for(cur_group in groups){
+
+  seurat_subset <- subset(seurat_obj, cell_type == cur_group)
+
+  seurat_subset <- ProjectModules(
+    seurat_obj = seurat_subset,
+    seurat_ref = seurat_obj,
+    wgcna_name = cur_group,
+    wgcna_name_proj=paste0(cur_group, '_subset'),
+    assay="RNA"
+  )
+  seurat_subset <- ModuleExprScore(seurat_subset, n_genes = Inf)
+
+  scores <- GetModuleScores(seurat_subset)
+  MEs <- GetMEs(seurat_subset)
+  modules <- GetModules(seurat_subset)
+  mods <- levels(modules$module); mods <- mods[mods != 'grey']
+
+  # make a scatter plot of MEs vs Scores
+  scatter_list <- list()
+  for(cur_mod in mods){
+    print(cur_mod)
+    cur_color <- subset(modules, module == cur_mod) %>% .$color %>% unique()
+    plot_df <- data.frame(
+      ME = MEs[,cur_mod],
+      score = scores[,cur_mod],
+      module = cur_mod,
+      color = cur_color
+    )
+
+    p <- ggplot(plot_df, aes(x=ME, y=score)) +
+    geom_hline(yintercept=0, linetype='dashed', color='grey') +
+    geom_vline(xintercept=0, linetype='dashed', color='grey') +
+    ggrastr::rasterise(
+      geom_point(color=cur_color),
+      dpi=400,
+      scale=0.5
+    ) +
+    geom_smooth(method='lm', color='black', fill='lightgrey') +
+    stat_cor(method='pearson') +
+    ggtitle(cur_mod) +
+    theme(
+      plot.title = element_text(hjust=0.5, face='bold'),
+      panel.border = element_rect(color='black', fill=NA, size=1),
+      axis.line.y = element_blank(),
+      axis.line.x = element_blank(),
+      axis.title.y = element_blank(),
+      axis.title.x = element_blank(),
+      plot.margin = margin(0,0,0,0)
+    ) +
+    NoLegend()
+
+    scatter_list[[cur_mod]] <- p
+
+  }
+
+  pdf(paste0(fig_dir, 'ME_score_correlation_', cur_group,'.pdf'), width=12, height=12)
+  print(wrap_plots(scatter_list, ncol=5, nrow=5))
+  dev.off()
+}
+
+
+```
+
+
+Differential module eigengene testing to compare cell types
+
+```{r eval=FALSE}
+
+DMEs <- do.call(rbind, lapply(groups, function(cur_group){
+  dmes <- FindAllDMEs(
+    seurat_obj,
+    group.by = 'cell_type',
+    wgcna_name=cur_group
+  )
+  dmes$group
+}))
+
+write.csv(DMEs, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'brain_DMEs.csv'))
+
+```
