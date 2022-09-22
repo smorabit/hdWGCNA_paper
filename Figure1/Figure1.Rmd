@@ -475,3 +475,181 @@ DMEs <- do.call(rbind, lapply(groups, function(cur_group){
 write.csv(DMEs, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'brain_DMEs.csv'))
 
 ```
+
+
+Compare distributions of pairwise correlations
+
+```{r eval=FALSE}
+library(widyr)
+
+genes_use <- GetWGCNAGenes(seurat_obj, wgcna_name = 'ASC')
+X <- GetAssayData(seurat_obj, assay='RNA', slot='data')[genes_use,]
+X <- t(X)
+
+# pairwise corr
+out <- qlcMatrix::corSparse(X)
+
+# flatten for plotting
+plot_df <- reshape2::melt(out)
+pot_df <- subset(plot_df, Var1 != Var2)
+plot_df$group <- 1
+
+p <- plot_df %>%
+  ggplot(aes(x=value)) +
+  geom_histogram(aes(y=..density..), position="identity", alpha=0.5)+
+  geom_density(alpha=0.6)
+
+pdf(paste0(fig_dir, 'correlation_hist.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+X <- GetAssayData(
+  GetMetacellObject(seurat_obj, wgcna_name='ASC'),
+  assay = 'RNA', slot = 'data'
+)[genes_use,]
+X <- t(X)
+
+cor_mc <- qlcMatrix::corSparse(X)
+
+# flatten for plotting
+plot_df_mc <- reshape2::melt(cor_mc)
+plot_df_mc <- subset(plot_df, Var1 != Var2)
+plot_df_mc$group <- 2
+
+plot_df <- rbind(plot_df, plot_df_mc)
+
+
+p <- plot_df %>%
+  ggplot(aes(x=value, fill=group)) +
+#  geom_histogram(aes(y=..density..), position="identity", alpha=0.5)+
+  geom_density(alpha=0.6)
+
+pdf(paste0(fig_dir, 'correlation_hist2.pdf'), width=6, height=3)
+p
+dev.off()
+
+```
+
+
+Test different values for KNN K in the metacell algorithm
+
+```{r eval=FALSE}
+
+cell_type_col <- 'cell_type'
+sample_col = 'Sample'
+
+k_list <- c(5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)
+
+seurat_obj <- subset(seurat_full, Sample %in% c('C1', 'C2', 'C3', 'C4'))
+seurat_obj <- seurat_full
+
+for(cur_k in k_list){
+  print(cur_k)
+  seurat_obj <- MetacellsByGroups(
+    seurat_obj = seurat_obj,
+    group.by = c(cell_type_col, sample_col),
+    k = cur_k,
+    ident.group = cell_type_col
+  )
+
+  cur_stats <- GetWGCNAParams(seurat_obj)$metacell_stats
+  cur_stats$k <- cur_k
+  cur_stats$sparsity <- 1- cur_stats$density
+  metacell_stats <- rbind(metacell_stats, cur_stats)
+
+}
+
+# plot metacell stats
+metacell_stats$sparsity <- 1-as.numeric(metacell_stats$density)
+
+##################################################################
+# Compute the sparsity of each sample/celltype at
+# the single cell and the pseudobulk level
+##################################################################
+
+# get counts matrix and binarize:
+X <- GetAssayData(seurat_obj, slot='counts', assay='RNA')
+X[X > 0] <- 1
+
+samples <- as.character(unique(seurat_obj@meta.data[["Sample"]]))
+cell_types <- as.character(unique(seurat_obj@meta.data[["cell_type"]]))
+
+density_df <- data.frame()
+for(cur_sample in samples){
+  print(cur_sample)
+  for(cur_ct in cell_types){
+
+    # get list of cells for this sample and cell type
+    cur_cells <- seurat_obj@meta.data[[cell_type_col]] == cur_ct & seurat_obj@meta.data[[sample_col]] == cur_sample
+
+    # get matrix for this dataset
+    cur_X <- X[, cur_cells]
+
+    # compute density in single cells
+    sc_density <- sum(Matrix::colSums(cur_X)) / (nrow(cur_X)*ncol(cur_X))
+
+    # compute density in pseudobulk:
+    cur_pb <- Matrix::rowSums(cur_X)
+    pb_density <- sum(cur_pb != 0) / length(cur_pb)
+
+    cur_stats <- data.frame(
+      name = paste(c(cur_ct, cur_sample), collapse='#'),
+      max_shared = c(0,0),
+      mean_shared = c(0,0),
+      median_shared = c(0,0),
+      density = c(sc_density, pb_density),
+      n = c(ncol(cur_X), 1),
+      cell_type = cur_ct,
+      Sample = cur_sample,
+      k = c("0", "PB")
+
+    )
+    density_df <- rbind(density_df, cur_stats)
+
+  }
+}
+density_df$sparsity <- 1 - density_df$density
+
+
+
+plot_df <- rbind(density_df, metacell_stats)
+
+
+
+plot_df$k <- factor(
+  as.character(plot_df$k),
+  levels = c("0", as.character(k_list), 'PB')
+)
+levels(plot_df$k)[1] <- "SC"
+
+write.csv(plot_df, quote=FALSE, file=paste0(data_dir, 'metacell_stats.csv'))
+
+
+
+################################################################################
+# K vs Density
+################################################################################
+
+p <- ggline(
+  plot_df, x = 'k', y = 'density',
+  add = 'mean_se', group = 'cell_type', color='cell_type',
+  size=0.5
+  ) + NoLegend() +
+  theme(
+    panel.grid.major = element_line(size=0.2, color='lightgrey'),
+    panel.border = element_rect(size=0.5, color='black', fill=NA),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.text.x = element_text(size=8),
+    axis.text.y = element_text(size=8)
+  ) + scale_x_discrete(breaks=c("SC", "10", "20", "30", "40", "50", "PB")) +
+  ylab("1 - Sparsity") +
+  scale_color_manual(values=cp)
+
+pdf(paste0(fig_dir, 'metacell_sparsity.pdf'), width=6, height=4)
+
+p + facet_wrap(~ cell_type, ncol=3)
+dev.off()
+
+```
