@@ -1,0 +1,882 @@
+
+
+Load Zhou et al data into Seurat
+
+```{r eval=FALSE}
+
+# load R packages
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix)
+library(viridis)
+library(harmony)
+library(RColorBrewer)
+library(patchwork)
+library(ggpubr)
+library(tictoc)
+library(RColorBrewer)
+library(Hmisc)
+library(corrplot)
+library(enrichR)
+library(GeneOverlap)
+library(WGCNA)
+enableWGCNAThreads(nThreads = 8)
+theme_set(theme_cowplot())
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank(),
+  plot.title = element_text(hjust = 0.5)
+)
+
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/')
+
+# output directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+# location of the Zhou et al data processed with scanpy:
+indir <- '/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Zhou_2020/data/'
+
+
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Zhou_2020_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Zhou_2020_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.table(paste0(indir, 'Zhou_2020_processed_obs.csv'), sep=',', header=TRUE, row.names=1)
+# rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Zhou_2020_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Zhou_2020",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme
+pdf(paste0(fig_dir, 'test_umap.pdf'),  width=6, height=6, useDingbats=FALSE)
+p1
+dev.off()
+
+# make a test plot of the umap:
+p <- VlnPlot(seurat_obj, group.by='annotation', features='MOBP', pt.size=0) + NoLegend()
+pdf(paste0(fig_dir, 'test_vlnplot.pdf'),  width=8, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Zhou_2020.rds'))
+
+
+
+```
+
+Load Morabito & Miyoshi 2021 dataset into Seurat:
+
+```{r eval=FALSE}
+
+# location of the Zhou et al data processed with scanpy:
+indir <- '/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Swarup_2021/data/'
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Swarup_2021_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Swarup_2021_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.csv(paste0(indir, 'Swarup_2021_processed_obs.csv'), sep=',')
+rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Swarup_2021_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Swarup_2021",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'Swarup2021_umap.pdf'),  width=7, height=7, useDingbats=FALSE)
+p1
+dev.off()
+
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Swarup_2021.rds'))
+
+
+```
+
+Load Mathys 2019 dataset into Seurat:
+
+```{r eval=FALSE}
+
+
+# location of the Zhou et al data processed with scanpy:
+indir <- '/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Mathys_2019/data/'
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Mathys_2019_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Mathys_2019_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.csv(paste0(indir, 'Mathys_2019_processed_obs.csv'), sep=',')
+rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Mathys_2019_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Mathys_2019",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'Mathys_2019_umap.pdf'),  width=7, height=7, useDingbats=FALSE)
+p1
+dev.off()
+
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Mathys_2019.rds'))
+
+
+
+```
+
+Load Morabito 2020 dataset into Seurat:
+
+```{r eval=FALSE}
+
+# location of the Zhou et al data processed with scanpy:
+indir <- '/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Morabito_2020/data/'
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Morabito_2020_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Morabito_2020_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.csv(paste0(indir, 'Morabito_2020_processed_obs.csv'), sep=',')
+rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Morabito_2020_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Morabito_2020",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'Morabito_2020_umap.pdf'),  width=7, height=7, useDingbats=FALSE)
+p1
+dev.off()
+
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Morabito_2020.rds'))
+
+
+```
+
+
+Load Velmeshev 2019 dataset into Seurat:
+
+```{r eval=FALSE}
+
+# location of the Zhou et al data processed with scanpy:
+indir <- '/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Velmeshev_2019/data/'
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Velmeshev_2019_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Velmeshev_2019_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.csv(paste0(indir, 'Velmeshev_2019_processed_obs.csv'), sep=',')
+rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Velmeshev_2019_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Velmeshev_2019",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'Velmeshev_2019_umap.pdf'),  width=7, height=7, useDingbats=FALSE)
+p1
+dev.off()
+
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Velmeshev_2019.rds'))
+
+
+```
+
+
+
+Load Leng 2021 EC datasets into Seurat:
+
+```{r eval=FALSE}
+
+# location of the Zhou et al data processed with scanpy:
+indir <- "/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Leng_2021/data/"
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Leng_2021_EC_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Leng_2021_EC_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.csv(paste0(indir, 'Leng_2021_EC_processed_obs.csv'), sep=',')
+rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Leng_2021_EC_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Leng_2021_EC",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'Leng_2021_EC_umap.pdf'),  width=7, height=7, useDingbats=FALSE)
+p1
+dev.off()
+
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Leng_2021_EC.rds'))
+
+
+```
+
+
+Load Leng 2021 EC datasets into Seurat:
+
+```{r eval=FALSE}
+
+# location of the Lenmget al data processed with scanpy:
+indir <- "/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Leng_2021/data/"
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Leng_2021_SFG_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Leng_2021_SFG_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.csv(paste0(indir, 'Leng_2021_SFG_processed_obs.csv'), sep=',')
+rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Leng_2021_SFG_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Leng_2021_SFG",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'Leng_2021_SFG_umap.pdf'),  width=7, height=7, useDingbats=FALSE)
+p1
+dev.off()
+
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Leng_2021_SFG.rds'))
+
+
+```
+
+
+
+Microglia integrated dataset
+
+```{r eval=FALSE}
+
+indir <- '/dfs7/swaruplab/smorabit/analysis/scWGCNA/microglia/data/'
+
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'microglia_integrated_counts.mtx'))
+
+# load harmony matrix
+X_scVI <- read.table(paste0(indir, 'microglia_integrated_scVI.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.csv(paste0(indir, 'microglia_integrated_obs.csv'), sep=',')
+rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'microglia_integrated_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_scVI) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Microglia_integrated",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set scVI
+seurat_obj@reductions$scVI <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_scVI),
+  key="SCVI",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='leiden', label=TRUE, pt.size=0.1, raster=FALSE) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'microglia_integrated_umap.pdf'),  width=7, height=7, useDingbats=FALSE)
+p1
+dev.off()
+
+p1 <- DimPlot(seurat_obj, group.by='leiden', split.by='Study', ncol=3, label=TRUE, pt.size=0.1, raster=FALSE) + NoLegend() + umap_theme + ggtitle('')
+pdf(paste0(fig_dir, 'microglia_integrated_umap_split.pdf'),  width=10, height=10, useDingbats=FALSE)
+p1
+dev.off()
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'microglia_integrated.rds'))
+
+
+```
+
+```{r eval=FALSE}
+
+
+# location of the Gerrits et al data processed with scanpy:
+indir <- '/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Gerrits_2021/data/'
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Gerrits_2021_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Gerrits_2021_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.table(paste0(indir, 'Gerrits_2021_processed_obs.csv'), sep=',', header=TRUE, row.names=1)
+# rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Gerrits_2021_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Gerrits_2021",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize
+seurat_obj <- NormalizeData(seurat_obj)
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend() + umap_theme
+pdf(paste0(fig_dir, 'test_umap_Gerrits.pdf'),  width=6, height=6, useDingbats=FALSE)
+p1
+dev.off()
+
+# make a test plot of the umap:
+p <- VlnPlot(seurat_obj, group.by='annotation', features='MOBP', pt.size=0) + NoLegend()
+pdf(paste0(fig_dir, 'test_vlnplot.pdf'),  width=8, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Gerrits_2021.rds'))
+
+
+
+
+```
+
+
+```{r eval=FALSE}
+
+
+# location of the Nagy et al data processed with scanpy:
+indir <- '/dfs7/swaruplab/shared_lab/cross-disorder/analysis/individual/Nagy_2020/data/'
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'Nagy_2020_counts.mtx'))
+
+# load harmony matrix
+X_harmony <- read.table(paste0(indir, 'Nagy_2020_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.table(paste0(indir, 'Nagy_2020_processed_obs.csv'), sep=',', header=TRUE, row.names=1)
+# rownames(cell_meta) <- cell_meta$X; cell_meta <- cell_meta %>% select(-c(X))
+
+gene_meta <- read.table(paste0(indir, 'Nagy_2020_processed_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "Nagy_2020",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize
+seurat_obj <- NormalizeData(seurat_obj)
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'Nagy_2020.rds'))
+
+
+
+
+```
+
+CD34+ dataset
+
+```{r eval=FALSE}
+
+# single-cell analysis package
+library(Seurat)
+
+# plotting and data science packages
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+
+# co-expression network analysis packages:
+library(WGCNA)
+library(hdWGCNA)
+
+# network analysis & visualization package:
+library(igraph)
+
+# using the cowplot theme for ggplot
+theme_set(theme_cowplot())
+
+# set random seed for reproducibility
+set.seed(12345)
+
+# location of the directory where the data was saved
+indir <- './'; data_dir <- './'
+
+# load the UMI counts gene expression matrix
+X <- Matrix::readMM(paste0(indir,'tutorial_singlecell.mtx'))
+
+# load harmony matrix
+X_pca <- read.table(paste0(indir, 'tutorial_singlecell_pca.csv'), sep=',', header=TRUE, row.names=1)
+
+# load the cell & gene metadata table:
+cell_meta <- read.delim(paste0(indir, 'tutorial_singlecell_obs.csv'), sep=',', header=TRUE, row.names=1)
+
+gene_meta <- read.table(paste0(indir, 'tutorial_singlecell_var.csv'), sep=',', header=TRUE, row.names=1)
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_pca) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "SEACells",
+  min.features = 0,
+  min.cells = 0
+)
+
+# set PCA reduction
+seurat_obj@reductions$pca <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_pca),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP reduction
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize expression matrix
+seurat_obj <- NormalizeData(seurat_obj)
+
+# save data:
+saveRDS(seurat_obj, file=paste0(data_dir, 'tutorial_seacells.rds'))
+
+##############################################################
+# SEACells metacells
+##############################################################
+
+X <- Matrix::readMM(paste0(indir,'tutorial_seacells.mtx'))
+
+cell_meta <- read.delim(paste0(indir, 'tutorial_seacells_obs.csv'), sep=',', header=TRUE, row.names=1)
+
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+
+# create a Seruat object:
+m_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  assay = "RNA",
+  project = "SEACells",
+  min.features = 0,
+  min.cells = 0
+)
+
+saveRDS(m_obj, file=paste0(data_dir, 'tutorial_seacells_metacell.rds'))
+
+##############################################################
+# MC2 metacells
+##############################################################
+
+# load and type cast to sparse matrix
+X <- Matrix::readMM(paste0(indir,'tutorial_MC2.mtx'))
+X <- as(X, 'dgCMatrix')
+
+cell_meta <- read.delim(paste0(indir, 'tutorial_MC2_obs.csv'), sep=',', header=TRUE, row.names=1)
+gene_meta <- read.table(paste0(indir, 'tutorial_MC2_var.csv'), sep=',', header=TRUE, row.names=1)
+
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+
+# create a Seruat object:
+m_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  assay = "RNA",
+  project = "MC2",
+  min.features = 0,
+  min.cells = 0
+)
+
+saveRDS(m_obj, file=paste0(data_dir, 'tutorial_MC2_metacell.rds'))
+
+```

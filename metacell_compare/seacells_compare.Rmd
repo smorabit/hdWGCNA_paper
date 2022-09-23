@@ -1,0 +1,886 @@
+
+```{r eval=FALSE}
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(WGCNA)
+
+library(Matrix)
+library(viridis)
+library(harmony)
+library(RColorBrewer)
+library(ggpubr)
+library(tictoc)
+library(RColorBrewer)
+library(Hmisc)
+library(corrplot)
+library(enrichR)
+library(GeneOverlap)
+library(grid)
+library(gridExtra)
+library(igraph)
+library(ggrepel)
+#library(hdWGCNA)
+enableWGCNAThreads(nThreads = 8)
+theme_set(theme_cowplot())
+set.seed(12345)
+
+
+# spatial plotting functions
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+source("/pub/smorabit/hdWGCNA/bin/spatial_functions.R")
+
+#devtools::install_github('smorabit/hdWGCNA', ref='dev')
+library(hdWGCNA)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/compare_seacells')
+
+# output directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+# re-load
+seurat_obj <- readRDS(file=paste0(data_dir, 'seacells_hdWGCNA.rds'))
+
+
+# load unprocessed data
+seurat_obj <- readRDS("~/swaruplab/smorabit/analysis/scWGCNA/data/tutorial_seacells.rds")
+
+```
+
+Plot the UMAP
+
+```{r eval=FALSE}
+
+p <- DimPlot(seurat_obj, group.by='celltype', label=TRUE) +
+  umap_theme() + coord_equal() + NoLegend() + theme(plot.title=element_blank())
+
+
+
+# plot the dendrogram
+png(paste0(fig_dir, "cd34_umap.png"),height=3, width=3, res=600, units='in')
+p
+dev.off()
+
+
+
+p <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'celltype',
+  raster_dpi = 600,
+  point_size=1, raster_scale=0.5,
+  plot_theme = umap_theme()
+) + ggtitle('')
+
+pdf(paste0(fig_dir, 'cd34_umap.pdf'), width=5, height=4)
+p
+dev.off()
+
+
+```
+
+Sparsity of seacells ?
+
+```{r eval=FALSE}
+
+# load SEACells metacell object
+mobj <- readRDS("~/swaruplab/smorabit/analysis/scWGCNA/data/tutorial_seacells_metacell.rds")
+
+X <- GetAssayData(mobj, slot='counts')
+X[X > 0] <- 1
+density <- sum(Matrix::colSums(X) / (nrow(X)*ncol(X)))
+density
+
+
+```
+
+Run hdWGCNA on the seacells dataset
+
+```{r eval=FALSE}
+
+seurat_obj2 <- seurat_obj
+
+seurat_obj$all_cells <- 'all'
+mobj$all_cells <- 'all'
+
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = "fraction",
+  fraction = 0.05,
+  wgcna_name = 'SEACells'
+)
+
+# add the seacells dataset
+seurat_obj <- SetMetacellObject(seurat_obj, mobj)
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+# setup expression matrix
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+#  group.by='all_cells',
+  group_name = 'all',
+  use_metacells=TRUE,
+)
+
+seurat_obj <- TestSoftPowers(seurat_obj, setDatExpr = FALSE)
+
+plot_list <- PlotSoftPowers(seurat_obj)
+
+# assemble with patchwork
+pdf(paste0(fig_dir, 'seacells_softpower.pdf'), width=12, height=8)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+seurat_obj <- ConstructNetwork(seurat_obj)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "seacells_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_obj, main='SEACells hdWGCNA Dendrogram')
+dev.off()
+
+seurat_obj <- ModuleEigengenes(seurat_obj,verbose=FALSE)
+
+# compute module connectivity:
+seurat_obj <- ModuleConnectivity(seurat_obj)
+
+```
+
+Run hdWGCNA using the hdWGCNA metacells
+
+```{r eval=FALSE}
+
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = "fraction",
+  fraction = 0.05,
+  wgcna_name = 'hdWGCNA'
+)
+
+
+seurat_obj <- MetacellsByGroups(
+  seurat_obj = seurat_obj,
+  group.by = "all_cells",
+  k = 50,
+  target_metacells=250,
+  ident.group = 'all_cells',
+  min_cells=0,
+  max_shared=5,
+)
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+mobj <- GetMetacellObject(seurat_obj, 'hdWGCNA')
+dim(mobj)
+
+X <- GetAssayData(mobj, slot='counts')
+X[X > 0] <- 1
+density <- sum(Matrix::colSums(X) / (nrow(X)*ncol(X)))
+density
+
+
+# setup expression matrix
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group.by='all_cells',
+  group_name = 'all',
+  use_metacells=TRUE,
+)
+
+seurat_obj <- TestSoftPowers(seurat_obj, setDatExpr = FALSE)
+
+
+plot_list <- PlotSoftPowers(seurat_obj)
+
+# assemble with patchwork
+pdf(paste0(fig_dir, 'hdWGCNA_softpower.pdf'), width=12, height=8)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+seurat_obj <- ConstructNetwork(seurat_obj, tom_name='hdWGCNA', overwrite_tom=TRUE)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "hdWGCNA_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_obj, main='hdWGCNA Dendrogram')
+dev.off()
+
+unique(GetModules(seurat_obj)$module)
+
+seurat_obj <- ModuleEigengenes(seurat_obj,verbose=FALSE)
+
+# compute module connectivity:
+seurat_obj <- ModuleConnectivity(seurat_obj)
+
+
+```
+
+Run hdWGCNA using MC2 metacells
+
+```{r eval=FALSE}
+
+mobj <- readRDS("~/swaruplab/smorabit/analysis/scWGCNA/data/tutorial_MC2_metacell.rds")
+
+
+seurat_obj$all_cells <- 'all'
+mobj$all_cells <- 'all'
+
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = "fraction",
+  fraction = 0.05,
+  wgcna_name = 'MC2'
+)
+
+wgcna_genes <- GetWGCNAGenes(seurat_obj)
+wgcna_genes <- wgcna_genes[wgcna_genes %in% rownames(mobj)]
+seurat_obj <- SetWGCNAGenes(seurat_obj, wgcna_genes)
+
+# add the seacells dataset
+seurat_obj <- SetMetacellObject(seurat_obj, mobj)
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+# setup expression matrix
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group_name = NULL,
+  use_metacells=TRUE,
+)
+
+seurat_obj <- TestSoftPowers(seurat_obj, setDatExpr = FALSE)
+
+
+plot_list <- PlotSoftPowers(seurat_obj)
+
+# assemble with patchwork
+pdf(paste0(fig_dir, 'MC2_softpower.pdf'), width=12, height=8)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+seurat_obj <- ConstructNetwork(seurat_obj, tom_name='MC2', overwrite_tom=TRUE)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "MC2_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_obj, main='MC2 hdWGCNA Dendrogram')
+dev.off()
+
+table(GetModules(seurat_obj)$module)
+
+
+seurat_obj <- ModuleEigengenes(seurat_obj,verbose=FALSE)
+
+# compute module connectivity:
+seurat_obj <- ModuleConnectivity(seurat_obj)
+
+saveRDS(seurat_obj, file=paste0(data_dir, 'seacells_hdWGCNA.rds'))
+
+
+```
+
+Rename Modules
+
+```{r eval=FALSE}
+
+# run RenameModules
+seurat_obj <- ResetModuleNames(
+  seurat_obj,
+  new_name = 'hd-M',
+  wgcna_name='hdWGCNA'
+)
+
+seurat_obj <- ResetModuleNames(
+  seurat_obj,
+  new_name = 'sc-M',
+  wgcna_name='SEACells'
+)
+
+seurat_obj <- ResetModuleNames(
+  seurat_obj,
+  new_name = 'mc2-M',
+  wgcna_name='MC2'
+)
+
+
+```
+
+
+Plotting
+
+```{r eval=FALSE}
+
+
+plot_list <- ModuleFeaturePlot(
+  seurat_obj, order=TRUE, raster=TRUE, raster_dpi=500, alpha=1, restrict_range=FALSE, raster_scale=0.5,
+  wgcna_name = 'SEACells'
+)
+
+plot_list <- lapply(1:length(plot_list), function(x){
+  plot_list[[x]] + NoLegend() + theme(plot.title=element_text(face='plain', vjust=0.25), plot.margin=margin(c(0,0,0,0)))
+})
+
+pdf("figures/featureplot_MEs_seacells.pdf",height=5, width=9)
+wrap_plots(plot_list, ncol=7)
+dev.off()
+
+png("figures/featureplot_MEs_seacells.png",height=6, width=12, res=600, units='in')
+wrap_plots(plot_list, ncol=6)
+dev.off()
+
+plot_list <- ModuleFeaturePlot(
+  seurat_obj, order=TRUE, raster=TRUE, raster_dpi=600, alpha=1, restrict_range=FALSE, raster_scale=0.5,
+  wgcna_name = 'hdWGCNA'
+)
+
+plot_list <- lapply(1:length(plot_list), function(x){
+  plot_list[[x]] + NoLegend() + theme(plot.title=element_text(face='plain', vjust=0.25), plot.margin=margin(c(0,0,0,0)))
+})
+
+
+pdf("figures/featureplot_MEs_hdWGCNA.pdf",height=5, width=9)
+wrap_plots(plot_list, ncol=7)
+dev.off()
+
+png("figures/featureplot_MEs_hdWGCNA.png",height=6, width=12, res=600, units='in')
+wrap_plots(plot_list, ncol=6)
+dev.off()
+
+plot_list <- ModuleFeaturePlot(
+  seurat_obj, order=TRUE, raster=TRUE, raster_dpi=600, alpha=1, restrict_range=FALSE, raster_scale=0.5,
+  wgcna_name = 'MC2'
+)
+plot_list <- lapply(1:length(plot_list), function(x){
+  plot_list[[x]] + NoLegend() + theme(plot.title=element_text(face='plain', vjust=0.25), plot.margin=margin(c(0,0,0,0)))
+})
+
+
+pdf("figures/featureplot_MEs_MC2.pdf",height=5, width=9)
+wrap_plots(plot_list, ncol=7)
+dev.off()
+
+png("figures/featureplot_MEs_MC2.png",height=6, width=12, res=600, units='in')
+wrap_plots(plot_list, ncol=6)
+dev.off()
+
+
+```
+
+
+Compare the results
+
+```{r eval=FALSE}
+
+
+m1 <- GetModules(seurat_obj, wgcna_name='SEACells')
+m2 <- GetModules(seurat_obj, wgcna_name='hdWGCNA')
+m3 <- GetModules(seurat_obj, wgcna_name='MC2')
+
+# get WGCNA network and module data
+net <- GetNetworkData(seurat_obj, wgcna_name="SEACells")
+
+
+m1_genes <- m1$gene_name
+m1_colors <- m1$color
+names(m1_colors) <- m1$gene_name
+
+m2_colors <- m2[m1$gene_name, 'color']
+m2_colors[m2_colors == NA] <- 'grey'
+names(m2_colors) <- m1$gene_name
+
+m3_colors <- m3[m1$gene_name, 'color']
+m3_colors[m3_colors == NA] <- 'grey'
+names(m3_colors) <- m1$gene_name
+
+
+color_df <- data.frame(
+  SEACells = m1_colors,
+  hdWGCNA = m2_colors,
+  MC2 = m3_colors
+
+)
+
+# plot dendrogram
+pdf(paste0(fig_dir, "compare_dendro.pdf"),height=3, width=5)
+WGCNA::plotDendroAndColors(
+  net$dendrograms[[1]],
+  color_df,
+  groupLabels=colnames(color_df),
+  dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05,
+  main = "SEACells dendro",
+)
+dev.off()
+
+
+
+
+m1 <- GetModules(seurat_obj, wgcna_name='SEACells')
+m2 <- GetModules(seurat_obj, wgcna_name='hdWGCNA')
+m3 <- GetModules(seurat_obj, wgcna_name='MC2')
+
+# get WGCNA network and module data
+net <- GetNetworkData(seurat_obj, wgcna_name="hdWGCNA")
+
+
+m2_genes <- m2$gene_name
+
+m2_colors <- m2$color
+names(m2_colors) <- m2$gene_name
+
+m1_colors <- m1[m2$gene_name, 'color']
+m1_colors[m2_colors == NA] <- 'grey'
+names(m1_colors) <- m1$gene_name
+
+m3_colors <- m3[m2$gene_name, 'color']
+m3_colors[m2_colors == NA] <- 'grey'
+names(m3_colors) <- m1$gene_name
+
+
+color_df <- data.frame(
+  hdWGCNA = m2_colors,
+  MC2 = m3_colors,
+  SEACells = m1_colors
+)
+
+# plot dendrogram
+pdf(paste0(fig_dir, "compare_dendro2.pdf"),height=3, width=5)
+WGCNA::plotDendroAndColors(
+  net$dendrograms[[1]],
+  color_df,
+  groupLabels=colnames(color_df),
+  dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05,
+  main = "hdWGCNA dendro",
+)
+dev.off()
+
+
+
+m1 <- GetModules(seurat_obj, wgcna_name='SEACells')
+m2 <- GetModules(seurat_obj, wgcna_name='hdWGCNA')
+m3 <- GetModules(seurat_obj, wgcna_name='MC2')
+
+# get WGCNA network and module data
+net <- GetNetworkData(seurat_obj, wgcna_name="MC2")
+
+
+m3_genes <- m3$gene_name
+m3_colors <- m3$color
+names(m3_colors) <- m3$gene_name
+
+m2_colors <- m2[m3$gene_name, 'color']
+m2_colors[m2_colors == NA] <- 'grey'
+names(m2_colors) <- m3$gene_name
+
+m1_colors <- m1[m3$gene_name, 'color']
+m1_colors[m1_colors == NA] <- 'grey'
+names(m1_colors) <- m3$gene_name
+
+
+color_df <- data.frame(
+  MC2 = m3_colors,
+  hdWGCNA = m2_colors,
+  SEACells = m1_colors
+
+)
+
+# plot dendrogram
+pdf(paste0(fig_dir, "compare_dendro3.pdf"),height=3, width=5)
+WGCNA::plotDendroAndColors(
+  net$dendrograms[[1]],
+  color_df,
+  groupLabels=colnames(color_df),
+  dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05,
+  main = "MC2 dendro",
+)
+dev.off()
+
+
+```
+
+Gene overlap analysis
+
+```{r eval=FALSE}
+
+m1 <- GetModules(seurat_obj, wgcna_name='SEACells')
+m2 <- GetModules(seurat_obj, wgcna_name='hdWGCNA')
+m3 <- GetModules(seurat_obj, wgcna_name='MC2')
+
+```
+
+RRHO analysis
+
+
+RRHO
+
+```{r eval=FALSE}
+
+
+library(RRHO)
+library(viridis)
+library(ggpubr)
+library(magrittr)
+
+# comparison 1:
+group1 <- 'SEACells'
+group2 <- 'hdWGCNA'
+plotname <- paste0(group1, '_vs_', group2)
+
+# comparison 2:
+group1 <- 'SEACells'
+group2 <- 'MC2'
+plotname <- paste0(group1, '_vs_', group2)
+
+# comparison 3:
+group1 <- 'hdWGCNA'
+group2 <- 'MC2'
+plotname <- paste0(group1, '_vs_', group2)
+
+
+
+m1 <- GetModules(seurat_obj, wgcna_name=group1)
+m2 <- GetModules(seurat_obj, wgcna_name=group2)
+
+# get MEs and exclude grey modules
+MEs1 <- GetMEs(seurat_obj, wgcna_name=group1)
+MEs1 <- MEs1[,colnames(MEs1) != 'grey']
+MEs2 <- GetMEs(seurat_obj, wgcna_name=group2)
+MEs2 <- MEs2[,colnames(MEs2) != 'grey']
+
+# only keep genes that are in both sets
+common_genes <- intersect(m1$gene_name, m2$gene_name)
+m1 %<>% subset(gene_name %in% common_genes)
+m2 %<>% subset(gene_name%in% common_genes)
+rownames(m1) <- m1$gene_name
+rownames(m2) <- m2$gene_name
+
+# get list of module names
+mods1 <- levels(m1$module); mods1 <- mods1[mods1 != 'grey']
+mods2 <- levels(m2$module); mods2 <- mods2[mods2 != 'grey']
+
+# correlation of MEs to order plots:
+temp <- Hmisc::rcorr(as.matrix(MEs1), as.matrix(MEs2), type='pearson')
+
+# get the coefficient & p-val
+cur_cor <- temp$r[mods1,mods2]
+cur_p <- temp$P
+
+# plot heatmap
+pdf(paste0(fig_dir, 'ME_cor_heat_', plotname,'.pdf'), width=7, height=7)
+ heatmap.2(cur_cor, Rowv=T, scale='none', dendrogram="row", col=bluered(200))
+dev.off()
+
+# re-order modules
+out <- heatmap.2(cur_cor, Rowv=T, scale='none', dendrogram="row", col=bluered(200))
+mods1 <- mods1[out$rowInd]
+mods2 <- mods2[out$colInd]
+
+# set up module colors
+m1_colors <- m1 %>% subset(module != 'grey') %>%
+  mutate(module = droplevels(module)) %>%
+  dplyr::select(module, color) %>% distinct
+rownames(m1_colors) <- as.character(m1_colors$module)
+m1_colors <- m1_colors[mods1,]
+m1_colors$module <- factor(as.character(m1_colors$module), levels=mods1)
+m1_colors$module <- fct_rev(m1_colors$module)
+m1_colors %<>% arrange(module)
+
+m2_colors <- m2 %>% subset(module != 'grey') %>%
+  mutate(module = droplevels(module)) %>%
+  dplyr::select(module, color) %>% distinct
+rownames(m2_colors) <- as.character(m2_colors$module)
+m2_colors <- m2_colors[mods2,]
+m2_colors$module <- factor(as.character(m2_colors$module), levels=mods2)
+
+# make a list of mods1-mods2 pairs
+pairs <- t(as.matrix(do.call(rbind, lapply(mods1, function(cur_mod){
+  data.frame(v1 = cur_mod, v2 = mods2)
+}))))
+
+
+# plot settings
+rrho_plot_list <- list()
+cor_list <- c()
+rrho_maxval <- 900
+colfunc <- inferno
+
+for(i in 1:ncol(pairs)){
+
+  cur_pair <- pairs[,i]
+  name <- paste(cur_pair, collapse='_')
+  print(name)
+  cur_x <- cur_pair[1];  cur_y <- cur_pair[2]
+
+  cur_m1 <- m1
+  cur_m1 <- cur_m1[,c('gene_name', 'module', 'color', paste0('kME_',cur_x))]
+  colnames(cur_m1)[4] <- 'kME'
+  cur_m2 <- m2
+  cur_m2 <- cur_m2[,c('gene_name', 'module', 'color', paste0('kME_',cur_y))]
+  colnames(cur_m2)[4] <- 'kME'
+
+  # make sure they are in the same order:
+  cur_m2 <- cur_m2[cur_m1$gene_name,]
+
+  # join the two dataframes
+  plot_df <- dplyr::inner_join(cur_m1, cur_m2, by = 'gene_name')
+
+  cur_cor <-  cor(x=as.numeric(plot_df$kME.x), y=as.numeric(plot_df$kME.y))
+  cor_list <- c(cor_list, cur_cor)
+
+  # set up gene lists
+  gl1 <- plot_df[,c('gene_name', 'kME.x')]
+  gl2 <- plot_df[,c('gene_name', 'kME.y')]
+
+  # run rrho
+  test <- RRHO(gl1, gl2, alternative='enrichment', BY=TRUE)
+  overlap_df <- reshape2::melt(test$hypermat.by)
+  range(overlap_df$value)
+  #subset(overlap_df, value != Inf) %>% .$value %>% max
+  overlap_df$value <- ifelse(overlap_df$value > rrho_maxval, rrho_maxval, overlap_df$value)
+
+  # plot rrho heatmap
+  p <- ggplot(overlap_df, aes(x=Var1, y=Var2, fill=value, color=value)) +
+    ggrastr::rasterise(geom_tile(), dpi=300) +
+    scale_fill_gradientn(colors=colfunc(256), limits=c(0, rrho_maxval)) +
+    scale_color_gradientn(colors=colfunc(256), limits=c(0, rrho_maxval)) +
+    theme(
+      plot.title=element_text(hjust=0.5, size=5, face='plain'),
+      axis.line=element_blank(),
+      axis.ticks=element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      axis.title = element_blank(),
+      plot.margin=margin(0,0,0,0)
+    ) + coord_equal()
+    #ggtitle(paste0(name, '\nR=', signif(as.numeric(cur_cor),3)))
+
+    # pdf(paste0(fig_dir, 'test_rrho.pdf'), width=5, height=5)
+    # p
+    # dev.off()
+
+    rrho_plot_list[[name]] <- p
+
+}
+
+colorbar1 <- m1_colors %>%
+  ggplot(aes(y=module, x=1, fill=module)) +
+  geom_tile(color='white') +
+  scale_fill_manual(values=m1_colors$color) +
+  NoLegend() +
+  theme(
+    plot.title=element_blank(),
+    axis.line=element_blank(),
+    axis.ticks.x =element_blank(),
+    axis.text.x = element_blank(),
+    axis.title = element_blank()
+  )
+
+
+colorbar2 <- m2_colors %>%
+  ggplot(aes(x=module, y=1, fill=module)) +
+  geom_tile(color='white') +
+  scale_fill_manual(values=m2_colors$color) +
+  NoLegend() + RotatedAxis() +
+  theme(
+    plot.title=element_blank(),
+    axis.line=element_blank(),
+    axis.ticks.y =element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_blank()
+  )
+
+
+# patch <- wrap_plots(rrho_plot_list, ncol=16)
+patch <- wrap_plots(rrho_plot_list, ncol=length(mods2))
+
+patch1 <- colorbar1 + patch + plot_layout(widths=c(1, 50))
+patch2 <- patch1 / colorbar2 + plot_layout(heights=c(50, 1), guides='collect')
+
+# plot size for comparison1
+pdf(paste0(fig_dir, 'module_rrho_', plotname, '.pdf'), width=17, height=20)
+patch2
+dev.off()
+
+# plot size for comparison 2
+pdf(paste0(fig_dir, 'module_rrho_', plotname, '.pdf'), width=14, height=20)
+patch2
+dev.off()
+
+# plot size for comparison 3
+pdf(paste0(fig_dir, 'module_rrho_', plotname, '.pdf'), width=14, height=16)
+patch2
+dev.off()
+
+
+```
+
+Overlap test between two sets of modules 
+
+```{r eval=FALSE}
+
+library(magrittr)
+
+# comparison 1:
+group1 <- 'SEACells'
+group2 <- 'hdWGCNA'
+plotname <- paste0(group1, '_vs_', group2)
+high_color = 'red'
+w=6
+
+# comparison 2:
+group1 <- 'SEACells'
+group2 <- 'MC2'
+plotname <- paste0(group1, '_vs_', group2)
+high_color = 'seagreen'
+w=7
+
+# comparison 3:
+group1 <- 'hdWGCNA'
+group2 <- 'MC2'
+plotname <- paste0(group1, '_vs_', group2)
+high_color = 'navy'
+w=6
+
+
+m1 <- GetModules(seurat_obj, wgcna_name=group1)
+m2 <- GetModules(seurat_obj, wgcna_name=group2)
+
+mods1 <- levels(m1$module); mods1 <- mods1[mods1 != 'grey']
+mods2 <- levels(m2$module); mods2 <- mods2[mods2 != 'grey']
+
+genome.size <- nrow(seurat_obj)
+
+
+# run overlaps between module gene lists and DEG lists:
+overlap_df <- do.call(rbind, lapply(mods1, function(cur_mod1){
+  cur_m1_genes <- m1 %>% subset(module == cur_mod1) %>% .$gene_name
+  cur_overlap_df <- do.call(rbind, lapply(mods2, function(cur_mod2){
+    print(paste0(cur_mod1, ' ', cur_mod2))
+    cur_m2_genes <- m2 %>% subset(module == cur_mod2) %>% .$gene_name
+    cur_overlap <- testGeneOverlap(newGeneOverlap(
+        cur_m1_genes,
+        cur_m2_genes,
+        genome.size=genome.size
+    ))
+    c(cur_overlap@odds.ratio, cur_overlap@pval, cur_overlap@Jaccard, length(cur_overlap@intersection))
+  })) %>% as.data.frame
+  colnames(cur_overlap_df) <- c('odds_ratio', 'pval', 'Jaccard', 'size_intersection')
+  cur_overlap_df$m1 <- cur_mod1
+  cur_overlap_df$m2 <- mods2
+
+  # module color:
+  #cur_overlap_df$color <- modules %>% subset(module == cur_mod) %>% .$color %>% unique
+  cur_overlap_df
+}))
+
+overlap_df$m1 <- factor(as.character(overlap_df$m1), levels=mods1)
+overlap_df$m2 <- factor(as.character(overlap_df$m2), levels=mods2)
+
+# re-order
+tmp <- unlist(lapply(mods2, function(cur_mod2){
+  cur <- subset(overlap_df, m2==cur_mod2)
+  which(cur$odds_ratio == max(cur$odds_ratio))
+}))
+
+overlap_df$m2 <- factor(as.character(overlap_df$m2), levels=rev(mods2[order(tmp)]))
+
+# adjust for multiple comparisons:
+overlap_df$fdr <- p.adjust(overlap_df$pval, method='fdr')
+
+# significance level:
+overlap_df$Significance <- gtools::stars.pval(overlap_df$fdr)
+overlap_df$Significance <- ifelse(
+  overlap_df$Significance == '.', '',
+  overlap_df$Significance
+)
+
+# plot the results as a heatmap:
+maxval <- 50
+plot_df <- overlap_df
+plot_df$odds_ratio <- ifelse(plot_df$odds_ratio > maxval, maxval, plot_df$odds_ratio)
+plot_df$textcolor <- ifelse(plot_df$odds_ratio > 0.7*maxval, 'white', 'black')
+
+
+p <- plot_df %>%
+  ggplot(aes(x=m1, y=m2, fill=odds_ratio)) +
+  geom_tile() +
+  geom_text(label=plot_df$Significance, vjust = 0.72, color=plot_df$textcolor) +
+  scale_fill_gradient(low='white', high=high_color) +
+  RotatedAxis() +
+  labs(fill = 'Odds ratio') +
+  theme(
+    panel.border = element_rect(fill=NA, color='black', size=1),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.margin=margin(0,0,0,0)
+  ) +
+  coord_equal()
+
+
+
+# set up module colors
+m1_colors <- m1 %>% subset(module != 'grey') %>%
+  mutate(module = droplevels(module)) %>%
+  dplyr::select(module, color) %>% distinct
+rownames(m1_colors) <- as.character(m1_colors$module)
+m1_colors <- m1_colors[mods1,]
+m1_colors$module <- factor(as.character(m1_colors$module), levels=levels(overlap_df$m1))
+#m1_colors$module <- fct_rev(m1_colors$module)
+m1_colors %<>% arrange(module)
+
+m2_colors <- m2 %>% subset(module != 'grey') %>%
+  mutate(module = droplevels(module)) %>%
+  dplyr::select(module, color) %>% distinct
+rownames(m2_colors) <- as.character(m2_colors$module)
+m2_colors <- m2_colors[mods2,]
+m2_colors$module <- factor(as.character(m2_colors$module), levels=levels(overlap_df$m2))
+
+
+m1_colors$var <- 1
+colorbar1 <- m1_colors %>%
+  ggplot(aes(x=module, y=var, fill=module)) +
+  geom_tile() +
+  scale_fill_manual(values=m1_colors$color) +
+  NoLegend() + RotatedAxis() +
+  theme(
+    plot.title=element_blank(),
+    axis.line=element_blank(),
+    axis.ticks.y =element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin=margin(0,0,0,0),
+  )
+
+m2_colors$var <- 1
+colorbar2 <- m2_colors %>%
+  ggplot(aes(y=module, x=var, fill=module)) +
+  geom_tile() +
+  scale_fill_manual(values=m2_colors$color) +
+  NoLegend() +
+  theme(
+    plot.title=element_blank(),
+    axis.line=element_blank(),
+    axis.ticks.x =element_blank(),
+    axis.text.x = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin=margin(0,0,0,0),
+  )
+
+
+
+layout <- "
+AB
+#C
+"
+
+pdf(paste0(fig_dir, 'module_overlap_', plotname, '.pdf'), width=w, height=4)
+colorbar2 + p + colorbar1 + plot_layout(design = layout, widths=c(1,50), heights=c(50,1))
+dev.off()
+
+
+
+
+```

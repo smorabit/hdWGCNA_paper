@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=Morabito
+#SBATCH -A vswarup_lab
+#SBATCH -p standard
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=150G
+#SBATCH --array=0-4
+#SBATCH --error=slurm-%J.err ## error log file
+source ~/.bashrc
+conda activate kallisto
+
+#set data_dir
+input_dir="/dfs3b/swaruplab/shared_lab/cross-disorder/raw_counts/Morabito_2020/fastqs/"
+output_dir="/dfs3b/swaruplab/shared_lab/cross-disorder/count_matrices/Morabito_2020/"
+ref_dir="/dfs3b/swaruplab/shared_lab/cross-disorder/kb/Cellranger_ref_human/"
+
+samples=($(ls $input_dir | cut -d '_' -f 1 | uniq))
+
+echo $samples
+let index="$SLURM_ARRAY_TASK_ID"
+sample_id=${samples[$index]}
+echo $sample_id
+
+# make output folder
+# mkdir $output_dir/$sample
+
+echo $input_dir/$sample_id*
+
+kb count \
+  -i $ref_dir/index.idx \
+  -g $ref_dir/t2g.txt \
+  -c1 $ref_dir/cdna.fa \
+  -c2 $ref_dir/intron.fa \
+  --workflow nucleus \
+  --overwrite \
+  -t 32 \
+  -x 10xv2 \
+  -o $output_dir/$sample_id/ \
+  --h5ad \
+  -m 4G \
+  $input_dir/$sample_id*

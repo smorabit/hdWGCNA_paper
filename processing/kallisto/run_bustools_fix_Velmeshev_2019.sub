@@ -1,0 +1,68 @@
+#!/bin/bash
+#SBATCH --job-name=bustools
+#SBATCH -p standard
+#SBATCH -A vswarup_lab
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --error=slurm-%J.err
+#SBATCH --mem 128G
+#SBATCH --array=0-53
+#SBATCH --time=24:00:00
+
+source ~/.bashrc
+
+# how many cores and how much memory?
+cores="16"
+mem="8G" # memory per core
+
+# kallisto reference directory
+ref="/dfs3b/swaruplab/smorabit/resources/kallisto_reference/GRch38/"
+
+# kb count output dir:
+data_dir="/dfs3b/swaruplab/shared_lab/cross-disorder/count_matrices/ASD_Velmeshev_2019/"
+
+# get a list of sample names:
+samples=($(ls $data_dir || uniq))
+
+# get current sample based on the SLURM job ID
+let index="$SLURM_ARRAY_TASK_ID"
+sample=${samples[$index]}
+echo $sample
+
+# input dir
+indir=${data_dir}/${sample}/
+cd $indir
+
+# run the bustools script:
+conda activate kallisto
+bash /dfs3b/swaruplab/shared_lab/cross-disorder/bin/bustools_count_snRNA.sh \
+    $indir  \
+    $ref \
+    $cores \
+    $mem
+
+# run the bustools script:
+conda activate scrublet
+python /dfs3b/swaruplab/shared_lab/cross-disorder/bin/scanpy_setup_counts.py \
+    --indir $indir  \
+    --ref $ref
+
+# re-name and move around the output files, then remove the temp folder
+mv tmp/adata.h5ad counts_unfiltered/
+
+mv tmp/spliced.mtx counts_unfiltered/
+mv tmp/spliced.genes.txt counts_unfiltered/
+mv tmp/spliced.barcodes.txt counts_unfiltered/
+
+mv tmp/unspliced.mtx counts_unfiltered/
+mv tmp/unspliced.genes.txt counts_unfiltered/
+mv tmp/unspliced.barcodes.txt counts_unfiltered/
+
+# bus files
+mv tmp/output.unfiltered.bus ./
+mv tmp/spliced.unfiltered.bus ./
+mv tmp/unspliced.unfiltered.bus ./
+
+# remove the tmp dir:
+rm -r tmp/

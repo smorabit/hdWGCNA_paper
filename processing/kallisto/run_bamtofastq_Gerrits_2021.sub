@@ -1,0 +1,55 @@
+#!/bin/bash
+#SBATCH --job-name=bam2fq
+#SBATCH -A vswarup_lab
+#SBATCH -p standard
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=150G
+#SBATCH --array=1-35
+#SBATCH --error=slurm-%J.err ## error log file
+source ~/.bashrc
+conda activate kallisto
+
+#set data_dir
+input_dir="/dfs3b/swaruplab/shared_lab/cross-disorder/raw_counts/AD_Gerrits_2021/bam/"
+output_dir="/dfs3b/swaruplab/shared_lab/cross-disorder/raw_counts/AD_Gerrits_2021/fastq/"
+
+samples=($(ls $input_dir | uniq))
+
+echo $samples
+let index="$SLURM_ARRAY_TASK_ID"
+sample_id=${samples[$index]}
+echo $sample_id
+
+# mkdir $output_dir/$sample_id
+
+infile=$(ls $input_dir$sample_id)
+echo $infile
+
+# run bamtofastq
+/dfs3b/swaruplab/smorabit/bin/software/bamtofastq/bamtofastq-1.3.2 \
+  --nthreads 32 \
+  $input_dir/$sample_id/$infile \
+  $output_dir/$sample_id/
+
+
+
+# make a temp directory
+mkdir $output_dir/$sample_id"_tmp"
+
+# loop through output directories from bamtofastq and move them all into one folder
+# per sample
+for dir in $output_dir/$sample_id/*
+do
+  name=$(basename $dir)
+  for file in $dir/*
+  do
+    new=$name"_"$(basename $file)
+    mv $file $output_dir/$sample_id"_tmp/"$new
+  done
+done
+
+# rename the temp dir
+rm -r $output_dir/$sample_id
+mv $output_dir/$sample_id"_tmp" $output_dir/$sample_id
