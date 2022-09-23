@@ -1,0 +1,1347 @@
+
+```{r eval=FALSE}
+
+# load R packages
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix)
+library(viridis)
+library(RColorBrewer)
+library(patchwork)
+library(ggpubr)
+library(RColorBrewer)
+library(WGCNA)
+library(monocle3)
+library(SeuratWrappers)
+library(harmony)
+theme_set(theme_cowplot())
+
+
+# spatial plotting functions
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+source("/pub/smorabit/hdWGCNA/bin/spatial_functions.R")
+
+#detach("package:hdWGCNA", unload=TRUE)
+#devtools::install_github('smorabit/hdWGCNA', ref='dev')
+library(hdWGCNA)
+
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/microglia/')
+
+# output directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+# re-load
+seurat_mg <- readRDS(file=paste0(data_dir, 'AD_MG_scWGCNA.rds'))
+
+
+
+
+load('/dfs7/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/celltype-analysis/data/color_scheme.rda')
+cp <- unlist(color_scheme_snRNA_celltype)
+cp[names(cp) == 'EX'] <- 'turquoise'
+color_df <- data.frame(
+  group = names(cp),
+  colour = cp
+)
+color_df['PER',] <- c('PER', 'orange')
+color_df['END',] <- c('END', 'darkorange')
+
+
+
+```
+
+Process AD dataset
+
+```{r eval=FALSE}
+
+# load AD dataset
+seurat_AD <- readRDS(file="/dfs7/swaruplab/smorabit/analysis/ADDS_2021/splitseq/integration/data/AD_integrated.rds" )
+
+seurat_AD <- FindVariableFeatures(seurat_AD)
+seurat_AD <- ScaleData(seurat_AD)
+seurat_AD <- RunPCA(seurat_AD)
+seurat_AD <- RunHarmony(seurat_AD, group.by.vars = 'Study')
+seurat_AD <- RunUMAP(seurat_AD, reduction='harmony', n.neighbors=15, dims=1:30, min.dist=0.1)
+
+p <- PlotEmbedding(
+  seurat_AD,
+  group.by = 'cell_type',
+  label=FALSE,
+  selected = 'MG',
+  raster=TRUE,
+  raster_dpi = 600,
+  plot_theme = umap_theme() + NoLegend()
+)
+
+pdf(paste0(fig_dir, 'AD_integrated_umap_MG.pdf'),  width=4, height=4, useDingbats=FALSE)
+p + ggtitle('')
+dev.off()
+
+# Plot the dataset split by Study colored by cell type
+plot_list <- PlotEmbedding(
+  seurat_AD,
+  group.by = 'cell_type',
+  split.by = 'Study',
+  label=FALSE,
+  raster=TRUE,
+  raster_dpi = 400,
+  raster_scale=0.25,
+  point_size=0.5,
+  plot_theme = umap_theme() + NoLegend(),
+  color_df = color_df
+)
+
+pdf(paste0(fig_dir, 'AD_integrated_umap_split.pdf'),  width=4, height=12, useDingbats=FALSE)
+wrap_plots(plot_list, ncol=1)
+dev.off()
+
+# subset micros
+seurat_mg <- subset(seurat_AD, cell_type == 'MG')
+seurat_mg <- RunUMAP(seurat_mg, reduction='harmony', n.neighbors=15,  dims=1:30, min.dist=0.1)
+
+```
+
+Microglia pseudotime analysis with monocle3:
+
+```{r eval=FALSE}
+
+# process the CDS
+microglia_cds <- as.cell_data_set(seurat_mg)
+microglia_cds <- cluster_cells(cds=microglia_cds, reduction_method='UMAP')
+
+p <- plot_cells(
+  cds = microglia_cds,
+  color_cells_by = "partition",
+  show_trajectory_graph = FALSE
+)
+
+pdf(paste0(fig_dir, 'umap_monocle.pdf'),  width=7, height=5, useDingbats=FALSE)
+p
+dev.off()
+
+# learn graph for pseudotime
+microglia_cds <- learn_graph(microglia_cds, use_partition=TRUE)
+
+p <- plot_cells(
+  cds = microglia_cds,
+  color_cells_by = "seurat_clusters",
+  show_trajectory_graph = TRUE,
+  label_principal_points = TRUE
+) + umap_theme
+
+pdf(paste0(fig_dir, 'umap_principal_points.pdf'),  width=7, height=5, useDingbats=FALSE)
+p
+dev.off()
+
+# get principal node & order cells
+principal_node <- 'Y_11'
+microglia_cds <- order_cells(microglia_cds,root_pr_nodes = principal_node)
+
+p <- plot_cells(
+  cds = microglia_cds,
+  color_cells_by = "pseudotime",
+  show_trajectory_graph = TRUE,
+  label_roots = TRUE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE,
+) + umap_theme
+
+pdf(paste0(fig_dir, 'umap_pseudotime.pdf'),  width=7, height=5, useDingbats=FALSE)
+p
+dev.off()
+
+
+# add pseudotime to seurat obj:
+seurat_mg$pseudotime <- pseudotime(microglia_cds)
+
+seurat_mg$UMAP1 <- seurat_mg@reductions$umap@cell.embeddings[,1]
+seurat_mg$UMAP2 <- seurat_mg@reductions$umap@cell.embeddings[,2]
+
+p <- seurat_mg@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.5) +
+  coord_equal() +
+  scale_color_gradientn(colors=plasma(256)) +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'MG_umap_pseudotime.pdf'),  width=4, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+saveRDS(microglia_cds, file=paste0(data_dir, 'microglia_cds.rds'))
+saveRDS(seurat_mg, file=paste0(data_dir, 'AD_MG_scWGCNA.rds'))
+
+```
+
+Run consensus hdWGCNA on the microglia dataset
+
+```{r eval=FALSE}
+
+library(hdWGCNA)
+
+seurat_mg <- SetupForWGCNA(
+  seurat_mg,
+  gene_select = "fraction",
+  fraction = 0.05,
+  group.by = 'Study',
+  wgcna_name = "MG"
+)
+length(GetWGCNAGenes(seurat_mg))
+
+# construct metacells:
+seurat_mg <- MetacellsByGroups(
+  seurat_obj = seurat_mg,
+  group.by = c("Diagnosis", "Study", "cell_type"),
+  k = 25,
+  reduction = 'harmony',
+  ident.group = 'cell_type'
+)
+
+seurat_mg <- NormalizeMetacells(seurat_mg)
+
+# set up a gene expression matrix list for each study
+seurat_mg <- SetMultiExpr(
+  seurat_mg,
+  group_name = "MG",
+  group.by = "cell_type",
+  multi.group.by = "Study",
+  multi_groups = NULL
+)
+
+# test the soft power threshold
+seurat_mg <- TestSoftPowersConsensus(
+  seurat_mg,
+  group.by='cell_type',
+  group_name="MG",
+  setDatExpr=FALSE
+)
+
+plot_list <-  PlotSoftPowers(seurat_mg)
+
+pdf(paste0(fig_dir, 'test_softpower_ggplot2.pdf'), width=10, height=8)
+wrap_plots(plot_list[[1]], ncol=2) + plot_annotation(
+  title = 'Morabito & Miyoshi',theme = theme(plot.title = element_text(hjust=0.5)))
+
+wrap_plots(plot_list[[2]], ncol=2) + plot_annotation(
+  title = 'Mathys',theme = theme(plot.title = element_text(hjust=0.5)))
+
+wrap_plots(plot_list[[3]], ncol=2) + plot_annotation(
+  title = 'Zhou',theme = theme(plot.title = element_text(hjust=0.5)))
+dev.off()
+
+
+seurat_mg <- ConstructNetwork(
+  seurat_mg,
+  soft_power=c(6,6,8),
+  consensus=TRUE,
+  setDatExpr=FALSE,
+  detectCutHeight=0.999999
+)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "MG_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_mg, main='MG Consensus Dendrogram')
+dev.off()
+
+seurat_mg <- ModuleEigengenes(
+  seurat_mg,
+  group.by.vars="Study", # snRNAseq batch
+  verbose=FALSE
+)
+
+# compute module connectivity:
+seurat_mg <- ModuleConnectivity(seurat_mg)
+
+# run RenameModules
+seurat_mg <- ResetModuleNames(
+  seurat_mg,
+  new_name = "MG-M"
+)
+print(names(GetModules(seurat_obj)))
+
+
+# save data:
+saveRDS(seurat_mg, file=paste0(data_dir, 'AD_MG_scWGCNA.rds'))
+saveRDS(seurat_AD, file=paste0(data_dir, 'AD_integrated_for_scwgcna.rds'))
+
+```
+
+change module colors
+
+```{r eval=FALSE}
+
+library(MetBrewer)
+
+modules <- GetModules(seurat_mg)
+mods <- levels(modules$module)
+mod_colors <- dplyr::select(modules, c(module, color)) %>%
+  distinct %>% arrange(module) %>% .$color
+n_colors <- length(mod_colors) -1
+
+new_colors <- paste0(met.brewer("Egypt", n=n_colors, type='discrete'))
+seurat_mg <- ResetModuleColors(seurat_mg, new_colors)
+
+```
+
+Downstream plotting
+
+```{r eval=FALSE}
+
+plot_list <- ModuleFeaturePlot(seurat_mg, order=TRUE, raster=TRUE, raster_dpi=400, alpha=0.7)
+pdf("figures/MG_featureplot_hMEs.pdf",height=4, width=16)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+plot_list <- ModuleFeaturePlot(seurat_mg, order=TRUE, raster=TRUE, raster_dpi=400, alpha=0.7, features='MEs')
+pdf("figures/MG_featureplot_MEs.pdf",height=4, width=16)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+################################################################################
+# Hubgene circle plots:
+################################################################################
+
+library(igraph)
+
+# individual module networks
+ModuleNetworkPlot(
+  seurat_mg,
+  mods = "all",
+  #label_center=TRUE,
+  outdir = paste0(fig_dir, 'MG_hubNetworks/')
+)
+
+
+################################################################################
+# UMAP:
+################################################################################
+
+seurat_mg <- RunModuleUMAP(
+  seurat_mg,
+  n_hubs = 10,
+  n_neighbors=15,
+  min_dist=0.3,
+  spread=5
+)
+
+# get the hub gene UMAP table from the seurat object
+umap_df <- GetModuleUMAP(
+  seurat_mg
+)
+
+label_genes <- c('CSF1R', 'CX3CR1', 'P2RY12', 'APOE', 'TYROBP', 'FTH1', 'B2M')
+
+library(reshape2)
+library(igraph)
+pdf(paste0(fig_dir, 'MG_hubgene_umap_igraph.pdf'), width=10, height=10)
+ModuleUMAPPlot(
+  seurat_mg,
+  edge.alpha=0.5,
+  sample_edges=TRUE,
+  keep_grey_edges=FALSE,
+  edge_prop=0.075, # taking the top 20% strongest edges in each module
+  label_genes = label_genes,
+  label_hubs=10 # how many hub genes to plot per module?
+)
+dev.off()
+
+
+```
+
+Enrichment analysis
+
+```{r eval=FALSE}
+
+library(enrichR)
+
+dbs <-c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021','LINCS_L1000_Chem_Pert_up','LINCS_L1000_Chem_Pert_down', 'WikiPathway_2021_Human', 'KEGG_2021_Human')
+
+# compute GO terms:
+seurat_mg <- RunEnrichr(seurat_mg, dbs=dbs)
+
+# make GO term plots:
+EnrichrBarPlot(
+  seurat_mg,
+  outdir = "figures/MG_enrichr_plots",
+  n_terms = 25, plot_size = c(4,16),
+  logscale=TRUE
+)
+
+# enrichr dotplot
+p <- EnrichrDotPlot(
+  seurat_mg,
+  database = dbs[1], n_terms=5,
+  break_ties=TRUE
+)
+pdf(paste0(fig_dir, 'MG_GO_dotplot.pdf'), width=10, height=10, useDingbats=FALSE)
+p
+dev.off()
+
+# inspect the enrichr table:
+enrichr_df <- GetEnrichrTable(seurat_mg) %>% subset(P.value < 0.05)
+
+
+write.table(enrichr_df, quote=FALSE, sep='\t', row.names=FALSE, file=paste0(data_dir, 'AD_MG_enrichr.tsv'))
+
+# save data:
+saveRDS(seurat_mg, file=paste0(data_dir, 'AD_MG_scWGCNA.rds'))
+
+# save module assignment table
+modules <- GetModules(seurat_mg) %>% subset(module != 'grey')
+write.csv(modules, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'AD_MG_module_assignments.csv'))
+
+```
+
+Plot selected go terms:
+
+```{r eval=FALSE}
+
+modules <- GetModules(seurat_mg)
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+module_colors <- modules %>% dplyr::select(c(module, color)) %>% distinct()
+rownames(module_colors) <- module_colors$module
+mod_colors <- module_colors[mods, 'color']
+names(mod_colors) <- mods
+
+# helper function to wrap text
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+selected_terms <- read.csv('data/AD_MG_enrichr_selected.csv')
+
+# remove GO Term ID
+selected_terms$Term <- str_replace(selected_terms$Term, " \\s*\\([^\\)]+\\)", "")
+
+selected_terms <- selected_terms %>%
+  group_by(module) %>%
+  arrange(Combined.Score)
+
+selected_terms$wrap <- wrapText(selected_terms$Term, 35)
+
+p <- selected_terms  %>%
+  ggplot(aes(x=log(Combined.Score), y=reorder(wrap, Combined.Score), fill=module))+
+  geom_bar(stat='identity', position='identity', color='white') +
+  geom_text(aes(label=wrap), x=.1, color='black', size=3.5, hjust='left') +
+  scale_fill_manual(values=mod_colors) +
+  ylab('Term') + xlab('log(Enrichment)') +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, NA)) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    legend.title = element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.text.y=element_blank(),
+    axis.line.y=element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+pdf(paste0(fig_dir, 'MG_selected_GO_terms.pdf'), width= 6, height=7 , useDingbats=FALSE)
+p + facet_wrap(~module, ncol=2, scales='free') + NoLegend()
+dev.off()
+
+```
+
+
+ME scores along the pseuodotime trajectory
+
+```{r eval=FALSE}
+
+# cut pseudotime into bins using
+seurat_mg <- BinPseudotime(seurat_mg, n_bins=c(10,50,100))
+
+# add MEs to seurat metadata
+MEs <- GetMEs(seurat_mg)
+modules <- GetModules(seurat_mg)
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+module_colors <- modules %>% dplyr::select(c(module, color)) %>% distinct()
+rownames(module_colors) <- module_colors$module
+mod_colors <- module_colors[mods, 'color']
+seurat_mg@meta.data <- cbind(seurat_mg@meta.data, MEs)
+
+# compute the average ME score in each bin:
+features <- mods
+avg_scores <- seurat_mg@meta.data %>%
+  group_by(pseudotime_bins_50) %>%
+  select(all_of(features)) %>%
+  summarise_all(mean)
+
+colnames(avg_scores)[1] <- 'bin'
+
+plot_df <- reshape2::melt(avg_scores)
+
+p1 <- ggplot(plot_df, aes(x = as.numeric(bin), y = value, color=variable)) +
+  geom_point() +
+  geom_smooth() +
+  scale_color_manual(values=mod_colors)+
+  xlab('Pseudotime') +
+  ylab('hME') +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  ) +
+  NoLegend()
+
+plot_list <- ModuleFeaturePlot(seurat_mg, order=TRUE, raster=TRUE, raster_dpi=400, alpha=0.7, title=FALSE)
+
+patch <- wrap_plots(plot_list, ncol=1)
+
+pdf(paste0(fig_dir, 'MG_pseudotime_hMEs.pdf'), width=6, height=6)
+(p1 + facet_wrap(~variable, ncol=1, scales='free')) | patch
+dev.off()
+
+```
+
+
+Module Preservation
+
+```{r eval=FALSE}
+
+seurat_mg <- SetDatExpr(
+  seurat_mg,
+  group_name = "MG",
+  group.by = "cell_type",
+  use_metacells = TRUE
+)
+
+################################################################################
+# Leng SFG
+################################################################################
+
+seurat_query <- readRDS('/dfs7/swaruplab/smorabit/analysis/scWGCNA/data/Leng_2021_SFG.rds')
+
+# get just microglia:
+seurat_query <- subset(
+  seurat_query,
+  cell_type == 'MG'
+)
+
+seurat_query <- ProjectModules(
+  seurat_obj = seurat_query,
+  seurat_ref = seurat_mg,
+  wgcna_name = "MG",
+  wgcna_name_proj="MG_projected"
+)
+
+plot_list <- ModuleFeaturePlot(seurat_query, order=TRUE, raster=TRUE, raster_dpi=400, alpha=1, restrict_range=FALSE, )
+pdf("figures/MG_featureplot_MEs_Leng_SFG.pdf",height=4, width=12)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+# run module preservation function for control & AD MG separately
+seurat_query <- SetDatExpr(
+  seurat_query,
+  group_name = "MG",
+  group.by = "cell_type",
+  use_metacells = FALSE,
+  assay = 'RNA'
+)
+
+seurat_query <- ModulePreservation(
+  seurat_query,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  n_permutations=100
+)
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_query,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_Leng_SFG.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_query, file=paste0(data_dir, 'Leng_2021_SFG_MG.rds'))
+
+
+################################################################################
+# Leng EC
+################################################################################
+
+seurat_query <- readRDS('/dfs7/swaruplab/smorabit/analysis/scWGCNA/data/Leng_2021_EC.rds')
+
+# get just microglia:
+seurat_query <- subset(
+  seurat_query,
+  cell_type == 'MG'
+)
+
+
+seurat_query <- ProjectModules(
+  seurat_obj = seurat_query,
+  seurat_ref = seurat_mg,
+  wgcna_name = "MG",
+  wgcna_name_proj="MG_projected"
+)
+
+plot_list <- ModuleFeaturePlot(seurat_query, order=TRUE, raster=TRUE, raster_dpi=400, alpha=0.7, restrict_range=FALSE)
+pdf("figures/MG_featureplot_MEs_Leng_EC.pdf",height=4, width=12)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+# run module preservation function for control & AD MG separately
+seurat_query <- SetDatExpr(
+  seurat_query,
+  group_name = "MG",
+  group.by = "cell_type",
+  use_metacells = FALSE,
+  assay = 'RNA'
+)
+
+seurat_query <- ModulePreservation(
+  seurat_query,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  n_permutations=100
+)
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_query,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_Leng_EC.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_query, file=paste0(data_dir, 'Leng_2021_EC_MG.rds'))
+
+
+GetModulePreservation(seurat_atac, "MG_projected")$Z[,'Zsummary.pres']
+
+
+
+################################################################################
+# ATAC-seq
+################################################################################
+
+seurat_atac <- readRDS('/dfs7/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/NucSeq_processed_activity_qc_batch_correct.rds')
+
+seurat_atac <- subset(
+  seurat_atac,
+  monocle_clusters_umap_Cell.Type == 'MG'
+)
+print(dim(seurat_atac))
+
+DefaultAssay(seurat_atac) <- 'RNA'
+seurat_atac <- ScaleData(seurat_atac)
+
+seurat_atac <- ProjectModules(
+  seurat_obj = seurat_atac,
+  seurat_ref = seurat_mg,
+  wgcna_name = "MG",
+  wgcna_name_proj="MG_projected"
+)
+
+# run module preservation function for control & AD MG separately
+seurat_atac <- SetDatExpr(
+  seurat_atac,
+  group_name = "MG",
+  group.by = "monocle_clusters_umap_Cell.Type",
+  use_metacells = FALSE,
+  assay = 'RNA'
+)
+
+seurat_atac <- ModulePreservation(
+  seurat_atac,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  n_permutations=100
+)
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_atac,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_AD_atac.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_atac, file=paste0(data_dir, 'Morabito_2021_atac_MG.rds'))
+
+
+GetModulePreservation(seurat_atac, "MG_projected")$Z[,'Zsummary.pres']
+
+
+################################################################################
+# Morabito et al 2020
+################################################################################
+
+seurat_query <- readRDS('../data/Morabito_2020.rds')
+seurat_query <- subset(seurat_query, cell_type == 'MG')
+
+
+seurat_query <- ProjectModules(
+  seurat_obj = seurat_query,
+  seurat_ref = seurat_mg,
+  wgcna_name = "MG",
+  wgcna_name_proj="MG_projected"
+)
+
+# run module preservation function for control & AD MG separately
+seurat_query <- SetDatExpr(
+  seurat_query,
+  group_name = "MG",
+  group.by = "cell_type",
+  use_metacells = FALSE,
+  assay = 'RNA'
+)
+
+seurat_query <- ModulePreservation(
+  seurat_query,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  n_permutations=100
+)
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_query,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_Morabito_2020.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_query, file=paste0(data_dir, 'Morabito_2020_MG.rds'))
+
+
+################################################################################
+# Gerrits et al OC
+################################################################################
+
+seurat_gerrits <- readRDS('../data/Gerrits_2021.rds')
+seurat_gerrits <- subset(seurat_gerrits, cell_type == 'MG' & Region == 'occipital cortex')
+
+# stratified sampling:
+sampled_cells <- seurat_gerrits@meta.data %>%
+  group_by(Sample) %>%
+  mutate(num_rows=n()) %>%
+  sample_frac(0.1, weight=num_rows) %>%
+  ungroup %>% .$barcode
+
+seurat_gerrits <- seurat_gerrits[,sampled_cells]
+
+
+seurat_gerrits <- FindVariableFeatures(seurat_gerrits)
+seurat_gerrits <- ScaleData(seurat_gerrits)
+
+seurat_gerrits <- ProjectModules(
+  seurat_obj = seurat_gerrits,
+  seurat_ref = seurat_mg,
+  group.by.vars=NULL,
+  wgcna_name_proj="MG_projected",
+  wgcna_name = "MG"
+)
+
+seurat_gerrits <- SetDatExpr(
+  seurat_gerrits,
+  group_name = "MG",
+  group.by = "cell_type",
+  use_metacells = FALSE,
+  assay = 'RNA'
+)
+
+
+# run module preservation function
+seurat_gerrits <- ModulePreservation(
+  seurat_gerrits,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  n_permutations=100
+)
+
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_gerrits,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_Gerrits_OC.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_gerrits, file=paste0(data_dir, 'Gerrits_2021_OC_sampled_MG.rds'))
+
+
+################################################################################
+# Gerrits et al OTC
+################################################################################
+
+seurat_gerrits <- readRDS('../data/Gerrits_2021.rds')
+seurat_gerrits <- subset(seurat_gerrits, cell_type == 'MG' & Region == 'occipitotemporal cortex')
+
+# stratified sampling:
+sampled_cells <- seurat_gerrits@meta.data %>%
+  group_by(Sample) %>%
+  mutate(num_rows=n()) %>%
+  sample_frac(0.1, weight=num_rows) %>%
+  ungroup %>% .$barcode
+
+seurat_gerrits <- seurat_gerrits[,sampled_cells]
+
+
+seurat_gerrits <- FindVariableFeatures(seurat_gerrits)
+seurat_gerrits <- ScaleData(seurat_gerrits)
+
+
+
+
+
+seurat_gerrits <- ProjectModules(
+  seurat_obj = seurat_gerrits,
+  seurat_ref = seurat_mg,
+  group.by.vars=NULL,
+  wgcna_name_proj="MG_projected",
+  wgcna_name = "MG"
+)
+
+seurat_gerrits <- SetDatExpr(
+  seurat_gerrits,
+  group_name = "MG",
+  group.by = "cell_type",
+  use_metacells = FALSE,
+  assay = 'RNA'
+)
+
+
+# run module preservation function
+seurat_gerrits <- ModulePreservation(
+  seurat_gerrits,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  n_permutations=100
+)
+
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_gerrits,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_Gerrits_OTC.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_gerrits, file=paste0(data_dir, 'Gerrits_2021_OTC_sampled_MG.rds'))
+
+
+
+
+################################################################################
+# 5xFAD
+################################################################################
+
+# load mouse <-> human gene name table:
+hg38_mm10_genes <- read.table(
+  "/dfs7/swaruplab/smorabit/resources/hg38_mm10_orthologs_2021.txt",
+  sep='\t',
+  header=TRUE
+)
+colnames(hg38_mm10_genes) <-c('hg38_id', 'mm10_id', 'mm10_name', 'hg38_name')
+hg38_mm10_genes <- dplyr::select(hg38_mm10_genes, c(hg38_name, mm10_name, hg38_id, mm10_id))
+
+hg38_mm10_genes <- subset(hg38_mm10_genes, mm10_name != '' & hg38_name != '')
+
+mm10_genes <- unique(hg38_mm10_genes$mm10_name)
+hg38_genes <- unique(hg38_mm10_genes$hg38_name)
+hg38_mm10_genes <- hg38_mm10_genes[match(mm10_genes, hg38_mm10_genes$mm10_name),]
+
+# load 5xFAD dataset
+seurat_mouse <- readRDS('/dfs7/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/mouse_integration/data/zhou_5xFAD_ProcessedSeuratFinal.rds')
+
+# subset microglia
+seurat_mouse <- subset(seurat_mouse, Cell.Types == 'MG')
+
+
+seurat_mouse <- FindVariableFeatures(seurat_mouse)
+seurat_mouse <- ScaleData(seurat_mouse)
+
+# having issue with duplicated genes???
+
+seurat_mouse <- ProjectModules(
+  seurat_mouse,
+  seurat_ref = seurat_mg,
+  gene_mapping=hg38_mm10_genes,
+  genome1_col="hg38_name", # genome of reference data
+  genome2_col="mm10_name", # genome of query data
+  scale_genes=TRUE,
+  wgcna_name_proj="MG_projected",
+  wgcna_name = "MG",
+  verbose=FALSE
+)
+
+
+seurat_mouse <- SetDatExpr(
+  seurat_mouse,
+  group_name = "MG",
+  group.by = "Cell.Types",
+  use_metacells = FALSE,
+  assay = "RNA"
+)
+
+# run module preservation function
+seurat_mouse <- ModulePreservation(
+  seurat_mouse,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  gene_mapping=hg38_mm10_genes,
+  genome1_col="hg38_name", # genome of reference data
+  genome2_col="mm10_name", # genome of query data
+  n_permutations=100
+)
+
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_mouse,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_Zhou_5x.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_mouse, file=paste0(data_dir, 'Zhou_5x_MG.rds'))
+
+
+
+################################################################################
+# Kiani shabestari et al
+################################################################################
+
+# load mouse <-> human gene name table:
+hg38_mm10_genes <- read.table(
+  "/dfs7/swaruplab/smorabit/resources/hg38_mm10_orthologs_2021.txt",
+  sep='\t',
+  header=TRUE
+)
+colnames(hg38_mm10_genes) <-c('hg38_id', 'mm10_id', 'mm10_name', 'hg38_name')
+hg38_mm10_genes <- dplyr::select(hg38_mm10_genes, c(hg38_name, mm10_name, hg38_id, mm10_id))
+
+hg38_mm10_genes <- subset(hg38_mm10_genes, mm10_name != '' & hg38_name != '')
+mm10_genes <- unique(hg38_mm10_genes$mm10_name)
+hg38_genes <- unique(hg38_mm10_genes$hg38_name)
+hg38_mm10_genes <- hg38_mm10_genes[match(mm10_genes, hg38_mm10_genes$mm10_name),]
+
+# load 5xfire dataset
+seurat_fire <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_mouse_seurat.rds')
+
+
+# subset microglia
+seurat_fire <- subset(seurat_fire, cellchat_clusters == 'IMM')
+
+seurat_fire <- ProjectModules(
+  seurat_fire,
+  seurat_ref = seurat_mg,
+  gene_mapping=hg38_mm10_genes,
+  genome1_col="hg38_name", # genome of reference data
+  genome2_col="mm10_name", # genome of query data
+  scale_genes=TRUE,
+  wgcna_name_proj="MG_projected",
+  wgcna_name = "MG",
+  verbose=FALSE
+)
+
+
+seurat_fire <- SetDatExpr(
+  seurat_fire,
+  group_name = "IMM",
+  group.by = "cellchat_clusters",
+  use_metacells = FALSE,
+  assay = "RNA"
+)
+
+# run module preservation function
+seurat_fire <- ModulePreservation(
+  seurat_fire,
+  seurat_ref = seurat_mg,
+  name="MG_projected",
+  wgcna_name = 'MG_projected',
+  wgcna_name_ref = 'MG',
+  verbose=3,
+  gene_mapping=hg38_mm10_genes,
+  genome1_col="hg38_name", # genome of reference data
+  genome2_col="mm10_name", # genome of query data
+  n_permutations=100
+)
+
+
+library(ggrepel)
+plot_list <- PlotModulePreservation(
+  seurat_fire,
+  name="MG_projected",
+  statistics = "summary"
+)
+
+pdf(paste0(fig_dir, 'MG_module_preservation_summary_FIRE.pdf'), width=8, height=4)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+saveRDS(seurat_fire, file=paste0(data_dir, 'FIRE_MG.rds'))
+
+
+```
+
+Plot module preservation results for all datasets as a heatmap:
+
+```{r eval=FALSE}
+
+seurat_files <- dir('data')[grep("_MG.rds", dir('data/'))]
+names(seurat_files) <- c('FIRE', 'Gerrits_OC', 'Gerrits_OTC', 'Leng_EC', 'Leng_SFG', 'Morabito_2020', 'Morabito_2021_atac', 'Zhou_5x')
+
+
+mp_df <- do.call(rbind, lapply(1:length(seurat_files), function(i){
+  x <- seurat_files[i]; name <- names(seurat_files)[i]
+  print(x)
+  cur_seurat <- readRDS(paste0(data_dir, x))
+  cur_df <- GetModulePreservation(cur_seurat, "MG_projected")$Z
+  cur_df$group <- name
+  cur_df$module <- rownames(cur_df)
+  cur_df
+}))
+
+
+# set min and max values:
+min_val <- 2; max_val <- 15
+plot_df <- mp_df
+plot_df$value <- ifelse(plot_df$Zsummary.pres > max_val, max_val, plot_df$Zsummary.pres)
+plot_df$anno <- ifelse(plot_df$Zsummary.pres > 10, "**", ifelse(plot_df$Zsummary.pres < 2, "x", "*"))
+
+plot_df <- plot_df %>% subset(!(module %in% c('gold', 'grey')))
+
+# order groups:
+plot_df$group <- factor(as.character(plot_df$group),
+levels = c('FIRE', 'Zhou_5x', 'Gerrits_OTC', 'Gerrits_OC', 'Leng_EC', 'Leng_SFG', 'Morabito_2021_atac', 'Morabito_2020'))
+
+
+p <- plot_df %>%
+  ggplot(aes(x=module, y=group, fill=value)) +
+  geom_tile() +
+  geom_text(label=plot_df$anno) +
+  scale_fill_gradient2(low='purple', mid='white', high='seagreen', breaks=c(0,2,15), midpoint=2) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  theme(
+    axis.line = element_blank(),
+    panel.border = element_rect(size=1, color='black', fill=NA),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+  ) + xlab('') + ylab('') + coord_equal()
+
+
+
+modules <- GetModules(seurat_mg)
+color_df <- modules %>% subset(module!='grey') %>%
+  select(c(module, color)) %>% distinct
+colnames(color_df) <- c('group', 'colour')
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+
+# make the colorbar as its own heatmap
+color_df$var <- 1
+colorbar <- color_df %>%
+  ggplot(aes(x=group, y=var, fill=group)) +
+  geom_tile() +
+  scale_fill_manual(values=color_df$colour) +
+  coord_equal() +
+  NoLegend() + RotatedAxis() +
+  theme(
+    plot.title=element_blank(),
+    axis.line=element_blank(),
+    axis.ticks.y =element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_blank(),
+    plot.margin=margin(0,0,0,0),
+  )
+
+
+pdf(paste0(fig_dir, 'module_preservation_heatmap.pdf'), width=5, height=5)
+p / colorbar
+dev.off()
+
+
+```
+
+Plot the scDRS results
+
+```{r eval=FALSE}
+
+scdrs_mathys <- read.table("/dfs7/swaruplab/nrahimza/for_scDRS/Mathys_scDRS_Processed/PASS_Alzheimers_Jansen2019.score")
+
+scdrs_zhou <- read.table("/dfs7/swaruplab/nrahimza/for_scDRS/Zhou_scDRS_Processed/PASS_Alzheimers_Jansen2019.score")
+
+scdrs_swarup <- read.table("/dfs7/swaruplab/nrahimza/for_scDRS/Swarup_scDRS_Processed/PASS_Alzheimers_Jansen2019.score")
+
+scdrs_df <- do.call(rbind, list(scdrs_mathys, scdrs_swarup, scdrs_zhou))
+
+ix <- match(as.character(seurat_mg$bc), rownames(scdrs_df))
+scdrs_df <- scdrs_df[ix,]
+all.equal(as.character(seurat_mg$bc), rownames(scdrs_df))
+scdrs_df$bc <- rownames(scdrs_df)
+
+write.csv(scdrs_df, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'AD_MG_scDRS_combined.csv'))
+
+seurat_mg$scdrs_zscore <- scdrs_df$zscore
+seurat_mg$scdrs_normscore <- scdrs_df$norm_score
+
+p <- seurat_mg@meta.data %>% arrange(scdrs_zscore) %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=scdrs_zscore)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.5) +
+  coord_equal() +
+  scale_color_gradient2(high='red', mid='grey', low='blue')+
+  umap_theme()
+
+pdf(paste0(fig_dir, 'MG_umap_scdrs.pdf'),  width=4, height=4)
+p
+dev.off()
+
+p <- seurat_mg@meta.data %>% arrange(scdrs_normscore) %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=scdrs_normscore)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.5) +
+  coord_equal() +
+  scale_color_gradient2(high='red', mid='grey', low='blue')+
+  umap_theme()
+
+pdf(paste0(fig_dir, 'MG_umap_scdrs_normscore.pdf'),  width=4, height=4)
+p
+dev.off()
+
+################################################################################
+# compute the average scDRS in each bin:
+################################################################################
+
+features <- 'scdrs_zscore'
+
+avg_scores <- seurat_mg@meta.data %>%
+  group_by(pseudotime_bins_50) %>%
+  select(all_of(features)) %>%
+  summarise_all(mean)
+
+colnames(avg_scores)[1] <- 'bin'
+
+plot_df <- reshape2::melt(avg_scores)
+plot_df$bin <- as.numeric(plot_df$bin)
+
+p1 <- ggplot(plot_df, aes(x = as.numeric(bin), y = value)) +
+  #geom_hline(yintercept=0, linetype='dashed', color='grey') +
+  geom_point() +
+  geom_smooth() +
+  #scale_color_manual(values=mod_colors)+
+  xlab('Pseudotime') +
+  ylab('scDRS zscore') +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  ) +
+  NoLegend()
+
+p <- plot_df %>%
+  ggscatter(
+    x = 'bin', y = 'value',
+    color='darkgrey',
+    add = "reg.line",
+    conf.int = TRUE,
+    add.params = list(color = 'black', fill='lightgrey')
+  ) +
+  stat_cor(method='pearson', label.x=0.1, label.y=1.5) +
+  xlab('Pseudotime') +
+  ylab('AD scDRS') +
+  NoLegend() +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'MG_pseudotime_scDRS.pdf'), width=4, height=2, useDingbats=FALSE)
+p
+dev.off()
+
+################################################################################
+# correlation of MEs and scDRS z-score
+#
+# Yeah I am aware that I could have written this code better ¯\_(ツ)_/¯
+################################################################################
+
+library(gtools)
+
+MEs <- GetMEs(seurat_mg)
+
+ad <- seurat_mg$Diagnosis == "AD"
+control <- seurat_mg$Diagnosis != "AD"
+
+c1 <- cor.test(MEs[ad,1], seurat_mg$scdrs_zscore[ad])
+c2 <- cor.test(MEs[ad,2], seurat_mg$scdrs_zscore[ad])
+c3 <- cor.test(MEs[ad,3], seurat_mg$scdrs_zscore[ad])
+c4 <- cor.test(MEs[ad,4], seurat_mg$scdrs_zscore[ad])
+
+plot_df <- data.frame(
+  corr = c(as.numeric(c1$estimate), as.numeric(c2$estimate), as.numeric(c3$estimate), as.numeric(c4$estimate)),
+  p = c(as.numeric(c1$p.value), as.numeric(c2$p.value), as.numeric(c3$p.value), as.numeric(c4$p.value)),
+  module = c('MG-M1', 'MG-M2', 'MG-M3', 'MG-M4')
+)
+plot_df$signif <- stars.pval(plot_df$p)
+plot_df$group <- 'AD'
+pdf_ad <- plot_df
+plot_df
+
+c1 <- cor.test(MEs[control,1], seurat_mg$scdrs_zscore[control])
+c2 <- cor.test(MEs[control,2], seurat_mg$scdrs_zscore[control])
+c3 <- cor.test(MEs[control,3], seurat_mg$scdrs_zscore[control])
+c4 <- cor.test(MEs[control,4], seurat_mg$scdrs_zscore[control])
+
+plot_df <- data.frame(
+  corr = c(as.numeric(c1$estimate), as.numeric(c2$estimate), as.numeric(c3$estimate), as.numeric(c4$estimate)),
+  p = c(as.numeric(c1$p.value), as.numeric(c2$p.value), as.numeric(c3$p.value), as.numeric(c4$p.value)),
+  module = c('MG-M1', 'MG-M2', 'MG-M3', 'MG-M4')
+)
+plot_df$signif <- stars.pval(plot_df$p)
+plot_df$group <- 'Control'
+pdf_control <- plot_df
+
+
+plot_df <- rbind(pdf_ad, pdf_control)
+
+plot_df$corrtext <- as.numeric(format(plot_df$corr, digits=2))
+plot_df$module <- factor(
+  as.character(plot_df$module),
+  levels = c('MG-M4', "MG-M3", "MG-M2", "MG-M1")
+)
+p <- plot_df %>%
+  ggplot(aes(y=module, x=group, fill=corr)) +
+  geom_tile() +
+  geom_text(label=plot_df$corrtext) +
+  scale_fill_gradient(low='white', high='red', breaks=c(0,0.5,1)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  theme(
+    axis.line = element_blank(),
+    panel.border = element_rect(size=1, color='black', fill=NA),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+  ) + ylab('') + coord_equal() + RotatedAxis()
+
+pdf(paste0(fig_dir, 'MG_scdrs_ME_corr.pdf'), width=3, height=5)
+p
+dev.off()
+
+
+```
+
+Differential module eigengene (DME) analysis
+
+In each of the 10 pseudotime bins, compute the control vs AD DEGs
+
+```{r eval=FALSE}
+
+group_col <- 'pseudotime_bins_10'
+groups <- levels(seurat_mg@meta.data[[group_col]])
+DME_list <- list()
+for(cur_group in groups){
+  print(cur_group)
+  # get cell barcodes for this pseudotime bin in control & AD
+  g1 <- seurat_mg@meta.data[seurat_mg[[group_col]] == cur_group & seurat_mg$Diagnosis == 'AD',] %>% rownames
+  g2 <- seurat_mg@meta.data[seurat_mg[[group_col]] == cur_group & seurat_mg$Diagnosis == 'Control',] %>% rownames
+
+  DMEs <- FindDMEs(
+    seurat_mg,
+    barcodes1 = g1,
+    barcodes2 = g2,
+    test.use='wilcox',
+    wgcna_name='MG'
+  )
+  DMEs$group <- cur_group
+
+  # fix infs:
+  DMEs$avg_log2FC <- ifelse(abs(DMEs$avg_log2FC) == Inf, 0, DMEs$avg_log2FC)
+  DME_list[[cur_group]] <- DMEs
+
+}
+DMEs <- do.call(rbind, DME_list)
+DMEs$group <- factor(
+  as.character(DMEs$group),
+  levels = groups
+)
+
+# save these DMEs
+write.csv(DMEs, row.names=FALSE, quote=FALSE, file=paste0(data_dir, "AD_MG_DMEs.csv"))
+
+# re-load DMEs:
+DMEs <- read.csv(paste0(data_dir, "AD_MG_DMEs.csv"))
+
+# point shape
+DMEs$shape <- ifelse(DMEs$p_val_adj < 0.05, 21, 4)
+
+# module colors:
+modules <- GetModules(seurat_mg)
+mod_colors <- dplyr::select(modules, c(module, color)) %>%
+  distinct
+cp <- mod_colors$color; names(cp) <- mod_colors$module
+
+# plot the DMEs:
+p <- DMEs %>%
+  ggplot(aes(x = group, y = avg_log2FC, fill=module, color=module)) +
+  geom_hline(yintercept=0, linetype='dashed', color='darkgrey') +
+  geom_segment(aes(y=0, yend=avg_log2FC, x=group, xend=group), size=0.5, color='grey') +
+  geom_point(size=3) +
+  geom_point(shape=DMEs$shape, color='black', fill=NA, size=3) +
+  scale_y_continuous(limits=c(-1, 2.5)) +
+  scale_color_manual(values=cp, guide='none') +
+  ylab(bquote("Average log"[2]~"(Fold Change)")) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ) + NoLegend()
+
+
+pdf(paste0(fig_dir, 'MG_pseudotime_DMEs.pdf'), width=3, height=6)
+p + facet_wrap(~module, ncol=1)
+dev.off()
+
+
+```
