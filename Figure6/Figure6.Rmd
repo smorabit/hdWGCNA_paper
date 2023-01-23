@@ -264,7 +264,6 @@ p <- p +
 ) +
 ylab('') + xlab('Bulk RNA-seq modules from AMPAD')
 
-
 # plot output
 pdf("figures/dotplot_ampad_projected.pdf",height=3.5, width=12)
 p

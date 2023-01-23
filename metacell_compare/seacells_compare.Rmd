@@ -5,7 +5,6 @@ library(tidyverse)
 library(cowplot)
 library(patchwork)
 library(WGCNA)
-
 library(Matrix)
 library(viridis)
 library(harmony)
@@ -26,12 +25,10 @@ enableWGCNAThreads(nThreads = 8)
 theme_set(theme_cowplot())
 set.seed(12345)
 
-
 # spatial plotting functions
 source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
 source("/pub/smorabit/hdWGCNA/bin/spatial_functions.R")
 
-#devtools::install_github('smorabit/hdWGCNA', ref='dev')
 library(hdWGCNA)
 
 setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/compare_seacells')
@@ -39,9 +36,6 @@ setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/compare_seacells')
 # output directories
 data_dir <- "data/"
 fig_dir <- 'figures/'
-
-# re-load
-seurat_obj <- readRDS(file=paste0(data_dir, 'seacells_hdWGCNA.rds'))
 
 
 # load unprocessed data
@@ -709,7 +703,7 @@ dev.off()
 
 ```
 
-Overlap test between two sets of modules 
+Overlap test between two sets of modules
 
 ```{r eval=FALSE}
 

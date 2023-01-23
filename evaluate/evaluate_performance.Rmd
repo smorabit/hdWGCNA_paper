@@ -1,0 +1,1010 @@
+
+
+Using the Zhou et al hdWGCNA analysis from Figure 1 of the paper, we need to
+evaluate the performance of the method as suggested by the peer reviewers.
+
+```{r eval=FALSE}
+
+
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+library(WGCNA)
+
+library(Matrix)
+library(viridis)
+library(harmony)
+library(RColorBrewer)
+library(ggpubr)
+library(tictoc)
+library(RColorBrewer)
+library(Hmisc)
+library(corrplot)
+library(enrichR)
+library(GeneOverlap)
+library(grid)
+library(gridExtra)
+library(igraph)
+library(ggrepel)
+library(hdWGCNA)
+library(magrittr)
+enableWGCNAThreads(nThreads = 8)
+theme_set(theme_cowplot())
+set.seed(12345)
+
+
+# spatial plotting functions
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+#devtools::install_github('smorabit/hdWGCNA', ref='dev')
+#library(hdWGCNA)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/')
+
+# output directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+# re-load scWGCNA dataset:
+load(file='data/Zhou_color_scheme.rda')
+
+
+# reload process ed with all cell types
+# seurat_obj <-  readRDS(file=paste0(data_dir, 'Zhou_scWGCNA_all_celltypes.rds'))
+
+
+load('/dfs7/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/celltype-analysis/data/color_scheme.rda')
+cp <- unlist(color_scheme_snRNA_celltype)
+cp[names(cp) == 'EX'] <- 'turquoise'
+
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/evaluate')
+
+seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/scWGCNA/brain_iterative/data/Zhou_scWGCNA_all_celltypes.rds')
+
+
+```
+
+Run EGAD tutorial
+
+https://github.com/sarbal/EGAD
+
+```{r eval=FALSE}
+
+# Load EGAD and the data files
+library(EGAD)
+data(biogrid)
+data(GO.human)
+
+# Or you can load EGADlite here too (https://github.com/sarbal/EGADLite):
+# load("EGADlite.RData")
+# download the data folder into your directory and run
+# load("data/biogrid.RData")
+# load("data/GO.human.RData")
+
+# Make your gene list and the network
+genelist <- make_genelist(biogrid)
+gene_network <- make_gene_network(biogrid,genelist)
+
+# Store your annotation matrix
+goterms <- unique(GO.human[,3])
+annotations <- make_annotations(GO.human[,c(2,3)],genelist,goterms)
+
+# Run GBA
+GO_groups_voted <- run_GBA(gene_network, annotations)
+
+# neighbor voting AUROCs
+auc_GO_nv = GO_groups_voted[[1]][,1]
+median(auc_GO_nv)
+
+# node degree AUCs
+auc_GO_nd = GO_groups_voted[[1]][,3]
+median(auc_GO_nd)
+
+length(goterms)
+length(genelist)
+
+dim(annotations)
+
+# all the genes and only some of the GO terms
+dim(GO_groups_voted[[2]])
+
+df <- data.frame(
+  nv_auc = auc_GO_nv,
+  nd_auc = auc_GO_nd
+)
+
+
+
+p1 <- ggplot(df, aes(y = nv_auc, x=1)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
+  ggtitle('Neighbor voting') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    panel.border =element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
+  )
+
+
+pdf(paste0(fig_dir, 'test_dens_example.pdf'), width=2, height=3)
+p1
+dev.off()
+
+
+```
+
+Try to run EGAD on our data
+
+Need to loop over each cell type
+
+```{r eval=FALSE}
+
+library(EGAD)
+
+groups <- c('ASC', 'EX', 'INH', 'MG', 'OPC', 'ODC')
+
+ensembl <- read.delim('/dfs7/swaruplab/smorabit/resources/ensembl_GO.txt', sep='\t', header=1)
+
+# load the genes file
+gene_table <- read.table('/dfs7/swaruplab/shared_lab/cross-disorder/count_matrices/AD_Zhou_2020/C1/counts_unfiltered/genes.tsv')
+gene_table$ID <- do.call(rbind, strsplit(gene_table$V1, '[.]'))[,1]
+
+
+plot_df <- data.frame()
+auc_df <- data.frame()
+for(cur_group in groups){
+
+  print(cur_group)
+
+  # get network info for this group
+  TOM <- GetTOM(seurat_obj, cur_group)
+  modules <- GetModules(seurat_obj, cur_group)
+
+  # get a list of unique genes
+  genelist <- unique(modules$gene_name)
+  genelist <- genelist[(genelist %in% gene_table$V2)]
+
+  # subset TOM to just these genes
+  TOM <- TOM[genelist,genelist]
+
+  # get IDs for these genes
+  ix <- match(genelist, gene_table$V2)
+  gene_ids <- gene_table$ID[ix]
+
+  # rename TOM genes to gene ids
+  colnames(TOM) <- gene_ids
+  rownames(TOM) <- gene_ids
+
+  # set up annotations
+  goterms <- unique(ensembl$GO.term.accession)
+  go_table <- ensembl[,c(1,4)] %>% subset(GO.term.accession != '')
+  annotations <- make_annotations(go_table, gene_ids, goterms)
+
+  print(dim(annotations))
+  length(gene_ids)
+  length(goterms)
+
+  # Run GBA
+  GO_groups_voted <- run_GBA(TOM, annotations, min=10, max=Inf)
+
+  # neighbor voting AUROCs
+  auc_GO_nv = GO_groups_voted[[1]][,1]
+
+  dim(GO_groups_voted[[2]])
+
+  # node degree AUCs
+  auc_GO_nd = GO_groups_voted[[1]][,3]
+
+  # multifunctionality
+  multifunc_assessment <- calculate_multifunc(annotations)
+  auc_mf <- auc_multifunc(annotations, multifunc_assessment[,4])
+  df <- data.frame(
+    auc = auc_mf,
+    annotation = colnames(annotations)
+  )
+  df$celltype <- cur_group
+  auc_df <- rbind(auc_df, df)
+
+  # neighbor voting df
+  df <- data.frame(
+    nv_auc = auc_GO_nv,
+    nd_auc = auc_GO_nd
+  )
+  df$celltype <- cur_group
+  plot_df <- rbind(plot_df, df)
+
+}
+
+
+
+auc_df %<>% subset(!is.nan(auc))
+
+t1 <- subset(auc_df, celltype == 'EX')
+t2 <- subset(auc_df, celltype == 'INH')
+
+all.equal(t1$annotation, t2$annotation)
+all.equal(t1$auc, t2$auc)
+
+plot_df %>% group_by(celltype) %>% summarise(Mean = median(nv_auc))
+
+subset(plot_df, celltype == 'ASC') %>% .$nv_auc %>% quantile
+
+# annotations <- c(rep(0,10))
+# annotations[c(1,3,5)] <- 1
+# optimallist <- 10:1
+# aurocs_mf <- auc_multifunc(annotations, optimallist)
+
+
+
+p1 <- ggplot(plot_df, aes(y = nv_auc, x=reorder(celltype, nv_auc, median), fill=celltype)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
+  scale_fill_manual(values=cp) +
+  RotatedAxis() +
+  NoLegend() +
+  ggtitle('Neighbor voting') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    panel.border =element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
+  )
+
+auc_df$celltype <- factor(
+  as.character(auc_df$celltype),
+  levels = c('ODC', 'EX', 'OPC', 'ASC', 'MG', 'INH')
+)
+
+p2 <- ggplot(auc_df, aes(y = auc, x=celltype, fill=celltype)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
+  scale_fill_manual(values=cp) +
+  RotatedAxis() +
+  NoLegend() +
+  ggtitle('Multifunctionality') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    panel.border = element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
+  )
+
+
+
+p3 <- ggplot(plot_df, aes(y = nd_auc, x=reorder(celltype, nd_auc, mean), fill=celltype)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
+  scale_fill_manual(values=cp) +
+  RotatedAxis() +
+  NoLegend() +
+  ggtitle('Node degree') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    panel.border =element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
+  )
+
+
+
+# p2 <- ggplot(df, aes(y = nd_auc, x=1)) +
+#   geom_violin() +
+#   ylim(c(0,1)) +
+#   xlab('')
+
+
+
+pdf(paste0(fig_dir, 'test_dens2.pdf'), width=3, height=3)
+p1
+dev.off()
+
+pdf(paste0(fig_dir, 'test_multifunc2.pdf'), width=3, height=3)
+p2
+dev.off()
+
+pdf(paste0(fig_dir, 'test_degree2.pdf'), width=3, height=3)
+p3
+dev.off()
+
+
+```
+
+Testing code for tracking runtime and memory of different functions
+
+1. MetacellsByGroups
+2. MetaspotsByGroups
+3. ConstructNetwork
+4. ModuleEigengenes
+5. ModuleConnectivity
+
+```{r eval=FALSE}
+
+
+seurat_asd <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/scWGCNA/ASD_case_study/data/Velmeshev_2019_hdWGCNA.rds')
+table(seurat_asd$cell_type)
+
+seurat_obj <- seurat_asd %>% subset(cell_type %in% c('INH', 'EX'))
+seurat_obj$cell_group <- 'Neuron'
+
+library(tictoc)
+
+mem_start <- gc()
+
+sample_sizes <- c(1000, 5000, 10000, 15000, 20000, 25000, 30000, 35000, 40000, 45000, 50000)
+
+runtime_df <- data.frame()
+for(n_sample in sample_sizes){
+
+  ################################################################################
+  # Setup the data
+  ################################################################################
+  print(n_sample)
+  # downsample to 1,000 cells
+  #n_sample <- 1000
+  #seurat_sample <- subset(seurat_obj, cell_type == 'ODC')
+
+  cells_sample <- sample(colnames(seurat_obj), n_sample)
+  seurat_sample <- seurat_obj[,cells_sample]
+  print(dim(seurat_sample))
+
+  seurat_sample <- SetupForWGCNA(
+    seurat_sample,
+    gene_select = "fraction",
+    fraction = 0.05,
+    wgcna_name = 'test'
+  )
+
+  ################################################################################
+  # MetaceLlsByGroups
+  ################################################################################
+  print('MetacellsByGroups')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- MetacellsByGroups(
+    seurat_sample,
+    group.by = c("cell_group", "Sample"),
+    k = 10,
+    max_shared = 5,
+    reduction = 'harmony',
+    ident.group = 'cell_group',
+    min_cells = 20
+  )
+  mcell_time <- toc()
+  mcell_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+  ################################################################################
+  # SetDatExpr & TestSoftPowers (not timed)
+  ################################################################################
+  print('SetDatExpr')
+
+  seurat_sample <- NormalizeMetacells(seurat_sample)
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- SetDatExpr(
+    seurat_sample,
+    group.by='cell_group',
+    group_name = unique(seurat_sample$cell_group),
+    use_metacells=TRUE,
+    slot = 'data',
+    assay = 'RNA'
+  )
+  sd_time <- toc()
+  sd_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+  seurat_sample <- TestSoftPowers(seurat_sample, setDatExpr = FALSE)
+
+
+  ################################################################################
+  # ConstructNetwork
+  ################################################################################
+  print('ConstructNetwork')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ConstructNetwork(
+    seurat_sample,
+    setDatExpr=FALSE,
+    tom_name = paste0('test', n_sample),
+    overwrite_tom=TRUE
+  )
+  cn_time <- toc()
+  cn_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+
+  ################################################################################
+  # ModuleEigengenes with harmony
+  ################################################################################
+  print('ModuleEigengenes + harmony')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ModuleEigengenes(
+    seurat_sample,
+    group.by.vars="Sample"
+  )
+  meh_time <- toc()
+  meh_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+  ################################################################################
+  # ModuleEigengenes
+  ################################################################################
+  print('ModuleEigengenes')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ModuleEigengenes(seurat_sample)
+  me_time <- toc()
+  me_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+  ################################################################################
+  # ModuleConnectivity
+  ################################################################################
+  print('ModuleConnectivity')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ModuleConnectivity(
+    seurat_sample,
+    group.by='cell_group',
+    group_name = as.character(unique(seurat_sample$cell_group))
+  )
+  mc_time <- toc()
+  mc_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+
+  ################################################################################
+  # Consolidate runtime information
+  ################################################################################
+
+  modules <- GetModules(seurat_sample)
+  n_mods <- length(unique(modules$module))
+
+  run_df <- data.frame(
+    'func' = c('MetacellsByGroups', 'SetDatExpr', 'ConstructNetwork', 'ModuleEigengenes', 'ModuleEigengenesHarmony', 'ModuleConnectivity'),
+    'runtime' = c(
+      as.numeric(mcell_time$toc - mcell_time$tic),
+      as.numeric(sd_time$toc - sd_time$tic),
+      as.numeric(cn_time$toc - cn_time$tic),
+      as.numeric(me_time$toc - me_time$tic),
+      as.numeric(meh_time$toc - meh_time$tic),
+      as.numeric(mc_time$toc - mc_time$tic)
+    ),
+    'memory' = c(
+      mcell_mem, sd_mem, cn_mem, me_mem, meh_mem, mc_mem
+    )
+  )
+  # run_df$memstr <- R.utils::hsize(run_df$memory)
+  run_df$sample <- n_sample
+
+  runtime_df <- rbind(runtime_df, run_df)
+
+  rm(seurat_sample)
+  gc()
+
+}
+
+write.csv(runtime_df, file='data/runtime_summary2.csv')
+
+################################################################################
+# Plot runtime results
+################################################################################
+
+
+# memory size of object
+# test <- GetMEs(seurat_sample)
+# object.size(GetMEs(seurat_sample)) / 1024 / 1024
+
+# set factor levels for function
+runtime_df$func <- ifelse(
+  as.character(runtime_df$func) == 'ModuleEigengenesHarmony',
+  'ME + Harmony',
+  as.character(runtime_df$func)
+)
+
+# compute totals
+total_df <- runtime_df %>% group_by(sample) %>% summarise(runtime = sum(runtime), memory = sum(memory))
+total_df$memstr <- R.utils::hsize(total_df$memory)
+total_df$func <- 'Total'
+total_df <- total_df[,colnames(runtime_df)]
+runtime_df <- rbind(runtime_df, total_df)
+
+runtime_df$func <- factor(
+  as.character(runtime_df$func),
+  levels = c('MetacellsByGroups', 'SetDatExpr', 'ConstructNetwork', 'ModuleEigengenes', 'ME + Harmony', 'ModuleConnectivity', 'Total'),
+)
+
+runtime_df <- subset(runtime_df, func != 'Total') %>% mutate(func = droplevels(func))
+
+
+p <- ggplot(runtime_df, aes(x=sample, y=memory/1024)) +
+  geom_point(color = 'darkgoldenrod3') +
+  geom_line(color = 'darkgoldenrod3') +
+  RotatedAxis() +
+  ylab('Memory upper bound (Gb)') +
+  xlab(expression(N[cells])) +
+  scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
+  )
+
+pdf(paste0(fig_dir, 'test_memory3.pdf'), width=5, height=3)
+p + facet_wrap(~func, ncol=3)
+# p + facet_wrap(~func, ncol=4, scales='free_y')
+dev.off()
+
+
+
+p <- ggplot(runtime_df, aes(x=sample, y=runtime / 60)) +
+  geom_point(color='darkorchid3') +
+  geom_line(color='darkorchid3') +
+  RotatedAxis() +
+  ylab('Runtime (minutes)') +
+  xlab(expression(N[cells])) +
+  scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
+  )
+
+pdf(paste0(fig_dir, 'test_runtime3.pdf'), width=5, height=3)
+# p + facet_wrap(~func, ncol=4, scales='free_y')
+p + facet_wrap(~func, ncol=3)
+dev.off()
+
+
+```
+
+Additional tests:
+
+1. Test the runtime of MetacellsByGroups changing the number of target metacells
+2. Runtime of ModuleConnectivity with downsampling
+   1. RRHO or spearman correlation of the resulting kMEs
+3. Runtime of ConstructNetwork with different numbers of genes as input
+
+```{r eval=FALSE}
+
+################################################################################
+# Test Metacells
+################################################################################
+
+target_metacells <- c(50, 100, 200, 500, 1000)
+
+mcell_run_df <- data.frame()
+
+for(cur_target in target_metacells){
+  print(cur_target)
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_obj <- MetacellsByGroups(
+    seurat_obj,
+    group.by = c("cell_type", "Sample"),
+    k = 25,
+    max_shared = 12,
+    reduction = 'harmony',
+    ident.group = 'cell_type',
+    min_cells = 50,
+    target_metacells = cur_target
+  )
+  mcell_time <- toc()
+  mcell_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+  cur_run_df <- data.frame(
+    'runtime' = as.numeric(mcell_time$toc - mcell_time$tic),
+    'memory' = mcell_mem,
+    'target' = cur_target,
+    'n_metacells' = ncol(GetMetacellObject(seurat_obj))
+  )
+
+  mcell_run_df <- rbind(mcell_run_df, cur_run_df)
+
+  seurat_obj <- SetMetacellObject(seurat_obj, NULL)
+  gc()
+
+}
+
+
+
+
+write.csv(mcell_run_df, file='data/mcell_runtime_summary.csv')
+
+################################################################################
+# Plot runtime results
+################################################################################
+
+p <- ggplot(mcell_run_df, aes(x=target, y=memory/1024)) +
+  geom_point() +
+  geom_line() +
+  RotatedAxis() +
+  ylab('Memory upper bound (Gb)') +
+  xlab(expression(N[target])) +
+  scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
+  )
+
+pdf(paste0(fig_dir, 'test_memory_mcell.pdf'), width=2.5, height=3)
+p
+# p + facet_wrap(~func, ncol=4, scales='free_y')
+dev.off()
+
+
+
+p <- ggplot(mcell_run_df, aes(x=target, y=runtime / 60)) +
+  geom_point() +
+  geom_line() +
+  RotatedAxis() +
+  ylab('Runtime (minutes)') +
+  xlab(expression(N[target])) +
+  scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9),
+    axis.title.y = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'test_runtime_mcell.pdf'), width=2.5, height=2)
+# p + facet_wrap(~func, ncol=4, scales='free_y')
+p
+dev.off()
+
+
+```
+
+Test re-writing module Connectivity using fastCor
+
+```{r eval=FALSE}
+
+library(HiClimR)
+library(qlcMatrix)
+library(tictoc)
+
+# get modules and MEs
+wgcna_name <- 'INH'
+group.by <- 'cell_type'; group_name <- 'INH'
+
+modules <- GetModules(seurat_obj, wgcna_name)
+MEs <- GetMEs(seurat_obj, harmonized=TRUE, wgcna_name)
+cells.use <- seurat_obj@meta.data %>% subset(get(group.by) %in% group_name) %>% rownames
+genes_use <- GetWGCNAGenes(seurat_obj, wgcna_name)
+
+
+# get expression data:
+exp_mat <- GetAssayData(
+  seurat_obj,
+  assay='RNA',
+  slot='data'
+)[genes_use,cells.use]
+datExpr <- t(as.matrix(exp_mat))
+
+#  transpose
+exp_mat <- t(exp_mat)
+
+MEs <- MEs[cells.use,]
+
+
+
+# correlate
+
+tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+tic()
+test <- qlcMatrix::corSparse(
+  X = exp_mat,
+  Y = as.matrix(MEs)
+)
+rownames(test) <- genes_use
+colnames(test) <- colnames(MEs)
+colnames(test) <- paste0("kME_", colnames(test))
+
+cor_time <- toc()
+cor_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+cor_time$toc - cor_time$tic
+cor_mem
+
+
+
+# correlate w/ wgcna function
+
+tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+tic()
+
+kMEs <- WGCNA::signedKME(
+  datExpr,
+  MEs,
+  outputColumnName = "kME",
+  corFnc = 'bicor',
+  corOptions = "use='p'"
+)
+colnames(kMEs) <- colnames(MEs)
+colnames(kMEs) <- paste0("kME_", colnames(kMEs))
+
+kme_time <- toc()
+kme_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+kme_time$toc - kme_time$tic
+kme_mem
+
+
+
+tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+tic()
+
+seurat_obj <- ModuleConnectivity(
+  seurat_obj,
+  group.by = 'cell_type',
+  group_name = 'INH',
+  wgcna_name = wgcna_name
+)
+
+mc_time <- toc()
+mc_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+mc_time$toc - mc_time$tic
+mc_mem
+
+
+
+tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+tic()
+
+seurat_obj <- ModuleConnectivity(
+  seurat_obj,
+  group.by = 'cell_type',
+  group_name = 'INH',
+  sparse = FALSE,
+  wgcna_name = wgcna_name
+)
+
+mco_time <- toc()
+mco_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+mco_time$toc - mco_time$tic
+mco_mem
+
+
+
+
+# correlation of the kME vs sparseCor:
+df <- reshape2::melt(as.matrix(kMEs))
+df2 <- reshape2::melt(test)
+all.equal(df$Var1, df2$Var2)
+
+plot_df <- data.frame(
+  kME = df$value,
+  sparseCor = df2$value,
+  gene = df$Var1,
+  module = do.call(rbind, strsplit(as.character(df$Var2), '_'))[,2]
+)
+plot_df$module <- factor(
+  as.character(plot_df$module),
+    levels=levels(modules$module)
+)
+
+mod_colors <- modules %>% select(c(module, color)) %>% distinct() %>% arrange(module)
+mod_cp <- mod_colors$color; names(mod_cp) <- mod_colors$module
+
+p <- plot_df %>% ggplot(aes(x = kME, y = sparseCor, color=module)) +
+  ggrastr::rasterise(geom_point(), dpi=300) +
+  geom_smooth(method = 'lm', color='grey5') +
+  ggpubr::stat_cor(label.y.npc="top", label.x.npc = "left", method = "pearson", size=2.5, color='black') +
+  scale_color_manual(values=mod_cp) +
+  scale_x_continuous(limits=c(-1,1)) +
+  scale_y_continuous(limits=c(-1,1)) +
+  theme(
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    panel.grid.major = element_line(size=0.5, color='lightgrey')
+  ) + NoLegend()
+
+pdf(paste0(fig_dir, 'test_kme_sparsecor.pdf'), width=10, height=8)
+p + facet_wrap(~module, ncol=5, scales='free')
+dev.off()
+
+
+
+
+
+# plot kMEs
+p <- PlotKMEs(seurat_obj, ncol=5, wgcna_name = wgcna_name)
+
+pdf(paste0(fig_dir, 'test_kmes.pdf'), width=10, height=8)
+p
+dev.off()
+
+
+################################################################################
+# Reassign modules kMEs with negative values
+################################################################################
+
+ReassignModules <- function(
+  seurat_obj,
+  harmonized=TRUE,
+  features=NULL,
+  new_modules=NULL,
+  ignore=FALSE,
+  wgcna_name=NULL
+){
+
+  if(is.null(wgcna_name)){wgcna_name <- seurat_obj@misc$active_wgcna}
+
+  # get modules and MEs from seurat object
+  modules <- GetModules(seurat_obj, wgcna_name)
+  MEs <- GetMEs(seurat_obj, harmonized, wgcna_name)
+  mod_colors <- dplyr::select(modules, c(module, color)) %>% distinct()
+  mod_cp <- mod_colors$color; names(mod_cp) <- as.character(mod_colors$module)
+  mods <- levels(modules$module); mods <- mods[mods != 'grey']
+  genes_use <- GetWGCNAGenes(seurat_obj, wgcna_name)
+
+
+  if(!is.null(features) & !is.null(new_modules)){
+
+    ##############################
+    # Manual reassignment
+    ##############################
+
+    # check validity of input features
+    if(!all(features %in% genes_use)){
+      stop('Some features are not found in GetWGCNAGenes(seurat_obj).')
+    }
+
+    # check validity of modules
+    if(!all(new_modules %in% levels(modules$module))){
+      stop('Some module names in new_modules are invalid. Features must be reassigned to existing modules found in GetModules(seurat_obj)')
+    }
+
+    # get original modules
+    orig_mods <- subset(modules, gene_name %in% features) %>% .$module %>% as.character()
+    if(!all(orig_mods == 'grey') & !ignore){
+      stop('Attempting to reassign non-grey genes to new modules. Proceed with caution. If you wish to reassign these genes, re-run this function and set ignore=TRUE')
+    }
+
+    # set up table for new module assignments
+    reassign_df <- data.frame(
+      gene_name = as.character(features),
+      module = as.character(new_modules)
+    )
+    reassign_df$module <- factor(as.character(reassign_df$module), levels = levels(modules$module))
+
+    # new colors:
+    reassign_df$color <- as.character(mod_cp[as.character(reassign_df$module)])
+
+    # reassign modules and colors
+    modules[reassign_df$gene_name,'module'] <- reassign_df$module
+    modules[reassign_df$gene_name,'color'] <- reassign_df$color
+
+  } else{
+
+
+    ##############################
+    # reassignment by kME
+    ##############################
+
+    # get genes with negative kME in their assigned module:
+    neg_df <- do.call(rbind, lapply(mods, function(cur_mod){
+      cur <- subset(modules, module == cur_mod)
+      cur <- cur[,c('gene_name', 'module', paste0('kME_', cur_mod))]
+      names(cur)[3] <- 'kME'
+      cur %>% subset(kME < 0)
+    }))
+    if(nrow(neg_df) == 0){
+      stop('No genes to reassign, all kMEs of assigned modules are greater than 0.')
+    }
+    rownames(neg_df) <- 1:nrow(neg_df)
+
+    print(dim(neg_df))
+
+    # get just the kME values from the modules table
+    kMEs <- modules[,4:ncol(modules)]
+    kMEs <- kMEs[,colnames(kMEs) != "kME_grey"]
+
+    # for each gene with negative kME values in the assigned module,
+    # identify the module that had the highest kME
+    reassigned <- sapply(neg_df$gene_name, function(cur_gene){
+      cur_kMEs <- kMEs[cur_gene,]
+      max_kME <- max(cur_kMEs)
+      if(max_kME < 0){
+        return('kME_grey')
+      }
+      colnames(kMEs)[which(cur_kMEs == max_kME)]
+    })
+
+    # add the reassigned modules to the modules table
+    reassigned <- do.call(rbind, strsplit(reassigned, 'kME_'))[,2]
+    reassigned <- factor(as.character(reassigned), levels=levels(modules$module))
+
+    # new colors:
+    reassigned_color <- as.character(mod_cp[as.character(reassigned)])
+
+    # reassign modules and colors
+    modules[neg_df$gene_name,'module'] <- reassigned
+    modules[neg_df$gene_name,'module'] <- reassigned_colors
+
+  }
+
+  # set the modules table
+  seurat_obj <- SetModules(seurat_obj, modules, wgcna_name)
+  seurat_obj
+}
+
+old_modules <- GetModules(seurat_obj, wgcna_name)
+
+# re-assign based on kME
+seurat_obj <- ReassignModules(
+  seurat_obj, wgcna_name=wgcna_name
+)
+
+# re-assign manually
+seurat_obj <- ReassignModules(
+  seurat_obj, wgcna_name=wgcna_name,
+   features=c('SLC17A7', 'GFAP'), new_modules = c('grey', 'INH-M7'),
+   ignore=FALSE
+)
+
+################################################################################
+# Plot Reassigned genes with ggsankey
+################################################################################
+
+library(ggsankey)
+
+mod_colors <- modules %>% select(c(module, color)) %>% distinct() %>% arrange(module)
+mod_cp <- mod_colors$color; names(mod_cp) <- mod_colors$module
+
+
+df <- mtcars %>%
+  make_long(cyl, vs, am, gear, carb)
+
+df <- neg_df %>%
+  make_long(module, reassigned)
+
+p <- ggplot(df, aes(x = x,
+               next_x = next_x,
+               node = node,
+               next_node = next_node,
+               fill = factor(node),
+               color = factor(node)
+               label = node)) +
+  geom_sankey(flow.alpha=0.75) +
+  geom_sankey_label(size = 3.5, color = 1, fill = "white") +
+  theme_sankey(base_size = 16) +
+  scale_fill_manual(values=mod_cp) +
+  NoLegend() +
+  xlab('')
+
+pdf(paste0(fig_dir, 'test_kmes_reassigned.pdf'), width=6, height=8)
+p
+dev.off()
+
+
+```
