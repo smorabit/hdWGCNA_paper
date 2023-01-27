@@ -1,0 +1,908 @@
+
+Download MAS-Seq dataset:
+
+```{bash eval=FALSE}
+
+wget --recursive --no-parent https://downloads.pacbcloud.com/public/dataset/MAS-Seq/DATA-Revio-PBMC-1/4-SeuratMatrix/
+wget --recursive --no-parent https://downloads.pacbcloud.com/public/dataset/MAS-Seq/DATA-Revio-PBMC-2/4-SeuratMatrix/
+
+```
+
+```{r eval=FALSE}
+
+
+library(Seurat)
+library(tidyverse)
+library(WGCNA)
+enableWGCNAThreads(nThreads = 8)
+
+devtools::install_github('smorabit/hdWGCNA', ref='dev')
+library(hdWGCNA)
+
+library(magrittr)
+library(Matrix)
+library(harmony)
+library(ggpubr)
+library(tictoc)
+library(RColorBrewer)
+library(viridis)
+library(GeneOverlap)
+library(igraph)
+library(ggrepel)
+library(patchwork)
+library(cowplot)
+theme_set(theme_cowplot())
+set.seed(12345)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/MAS-Seq')
+
+# output directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+
+```
+
+Load MAS-Seq datasets and create a mulit-assay Seurat object
+
+```{r eval=FALSE}
+
+# directories with the counts matrices for each replicate
+sample_dirs <- c(
+  paste0(data_dir, 'DATA-Revio-PBMC-1/4-SeuratMatrix/NoNovelGenesIsoforms/'),
+  paste0(data_dir, 'DATA-Revio-PBMC-2/4-SeuratMatrix/NoNovelGenesIsoforms/')
+)
+names(sample_dirs) <- c('PBMC-1', 'PBMC-2')
+
+# load isoform counts matrices for each sample:
+iso_X_list <- lapply(sample_dirs, function(x){Seurat::Read10X(paste0(x, 'isoforms_seurat/'))})
+
+# load gene counts matrices for each sample:
+gene_X_list <- lapply(sample_dirs, function(x){Seurat::Read10X(paste0(x, 'genes_seurat/'))})
+
+# only keep isoforms that are common in all samples:
+common_iso <- Reduce(intersect, lapply(iso_X_list, function(x){rownames(x)}))
+iso_X_list <- lapply(iso_X_list, function(x){x[common_iso,]})
+
+# only keep genes that are common in all samples:
+common_genes <- Reduce(intersect, lapply(gene_X_list, function(x){rownames(x)}))
+gene_X_list <- lapply(gene_X_list, function(x){x[common_genes,]})
+
+# create individual Seurat objects for each sample
+seurat_list <- lapply(1:length(sample_dirs), function(i){
+  cur <- Seurat::CreateSeuratObject(gene_X_list[[i]], min.cells=5);
+  cur$barcode <- colnames(cur)
+  cur$Sample <- names(sample_dirs)[[i]]
+  cur[["iso"]] <- Seurat::CreateAssayObject(counts = iso_X_list[[i]], min.cells=5)
+  cur
+})
+
+# merge into one Seurat object
+seurat_obj <- Reduce(merge, seurat_list)
+
+# save the unprocessed Seurat object
+saveRDS(seurat_obj, file = paste0(data_dir, 'PBMC_masseq_unprocessed_seurat.rds'))
+
+```
+
+Perform basic clustering analysis of the MAS-Seq PBMC dataset on the genes assay
+
+```{r eval=FALSE}
+
+# re-load the unprocessed Seurat object
+seurat_obj <- readRDS(file = paste0(data_dir, 'PBMC_masseq_unprocessed_seurat.rds'))
+
+# set assay to RNA
+DefaultAssay(seurat_obj) <- 'RNA'
+
+################################################################################
+# 1. QC Filtering
+################################################################################
+
+# violin plots for different QC stats
+features <- c('nCount_RNA', 'nFeature_RNA', 'nCount_iso', 'nFeature_iso')
+
+plot_list <- lapply(features, function(x){ VlnPlot(
+  seurat_obj,
+  features = x,
+  group.by = 'Sample',
+  pt.size=0) +
+  RotatedAxis() +
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+pdf(paste0(fig_dir, 'vln_qc.pdf'), width=6, height=3)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+# keep cells with greater than 500 UMIs and fewer than 5000 UMIs
+seurat_obj <- subset(seurat_obj, nCount_RNA >= 500 & nCount_RNA <= 5000)
+
+################################################################################
+# 2. Normalization, Scaling, and linear dimensionality reduction
+################################################################################
+
+seurat_obj <- seurat_obj %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA()
+
+# run harmony
+seurat_obj <- RunHarmony(seurat_obj, group.by.vars = 'Sample')
+
+################################################################################
+# 3. Non-linear dim reduction and clustering
+################################################################################
+
+# UMAP
+seurat_obj <- RunUMAP(seurat_obj, dims=1:30, min.dist=0.3, reduction='harmony')
+
+# clustering
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:30, reduction='harmony')
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+
+################################################################################
+# 4. Plotting
+################################################################################
+
+# plot clusters and samples on the UMAP
+p1 <- DimPlot(seurat_obj, group.by = 'seurat_clusters', label=TRUE) + umap_theme()
+p2 <- DimPlot(seurat_obj, group.by = 'Sample', label=TRUE) + umap_theme()
+p3 <- FeaturePlot(seurat_obj, features='nCount_RNA')
+
+pdf(paste0(fig_dir, 'umap_RNA.pdf'), width=8, height=8)
+(p1 | p2) / (p3 | plot_spacer())
+dev.off()
+
+```
+
+
+Perform basic clustering analysis of the MAS-Seq PBMC dataset on the genes assay
+
+```{r eval=FALSE}
+
+# re-load the unprocessed Seurat object
+seurat_obj <- readRDS(file = paste0(data_dir, 'PBMC_masseq_unprocessed_seurat.rds'))
+
+# set assay to RNA
+DefaultAssay(seurat_obj) <- 'RNA'
+
+################################################################################
+# 1. QC Filtering
+################################################################################
+
+# violin plots for different QC stats
+features <- c('nCount_RNA', 'nFeature_RNA', 'nCount_iso', 'nFeature_iso')
+
+plot_list <- lapply(features, function(x){ VlnPlot(
+  seurat_obj,
+  features = x,
+  group.by = 'Sample',
+  pt.size=0) +
+  RotatedAxis() +
+  NoLegend() +
+  geom_boxplot(notch=TRUE, fill=NA, outlier.shape=NA) +
+  xlab('') +
+  theme(plot.title = element_text(size=10, hjust=0.5))
+})
+
+pdf(paste0(fig_dir, 'vln_qc.pdf'), width=6, height=3)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+# keep cells with greater than 500 UMIs and fewer than 5000 UMIs
+seurat_obj <- subset(seurat_obj, nCount_RNA >= 500 & nCount_RNA <= 5000)
+
+################################################################################
+# 2. Normalization, Scaling, and linear dimensionality reduction
+################################################################################
+
+seurat_obj <- seurat_obj %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA(reduction.name = 'pca_RNA')
+
+# run harmony
+seurat_obj <- RunHarmony(
+  seurat_obj,
+  group.by.vars = 'Sample',
+  reduction='pca_RNA'
+)
+seurat_obj@reductions[['harmony_RNA']] <- seurat_obj@reductions[['harmony']]
+
+################################################################################
+# 3. Non-linear dim reduction and clustering
+################################################################################
+
+# UMAP
+seurat_obj <- RunUMAP(
+  seurat_obj,
+  dims=1:30,
+  min.dist=0.3,
+  reduction='harmony_RNA',
+  reduction.name = 'umap_RNA'
+)
+
+# clustering
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:30, reduction='harmony_RNA')
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+seurat_obj$seurat_clusters_RNA <- seurat_obj$seurat_clusters
+
+################################################################################
+# 4. Plotting
+################################################################################
+
+# plot clusters and samples on the UMAP
+p1 <- DimPlot(seurat_obj, group.by = 'seurat_clusters_RNA', label=TRUE, reduction='umap_RNA') +
+  umap_theme() + NoLegend()
+p2 <- DimPlot(seurat_obj, group.by = 'Sample', label=TRUE, reduction='umap_RNA') +
+  umap_theme() + NoLegend()
+p3 <- FeaturePlot(seurat_obj, features='nCount_RNA', reduction='umap_RNA') + umap_theme()
+
+pdf(paste0(fig_dir, 'umap_RNA.pdf'), width=12, height=4)
+p1 | p2 | p3
+dev.off()
+
+################################################################################
+# 5. cell type annotation
+################################################################################
+
+markers = list(
+'ASDC_mDC'= c('AXL', 'LILRA4', 'SCN9A', 'CLEC4C'),
+'ASDC_pDC'=c('SCT', 'PROC', 'LTK'),
+'cDC'= c('CD14', 'FCER1A', 'CLEC10A', 'ENHO', 'CD1C'),
+'Eryth'= c('HBM', 'HBD', 'SNCA', 'ALAS2'),
+'Mature B'= c('MS4A1', 'IGKC', 'IGHM', 'CD24', 'CD22'),
+'Memory B'= c('BANK1', 'CD79A', 'SSPN'),
+'Naive B'= c('TCL1A', 'IGHD', 'IL4R', 'CD79B'),
+'CD14 Mono'= c('LYZ', 'CTSD', 'VCAN', 'CTSS'),
+'CD16 Mono'= c('LST1', 'YBX1', 'AIF1', 'MS4A7'),
+'CD4 CTL'= c('GZMH', 'CD4', 'GNLY', 'IL7R', 'CCL5'),
+'CD4+ Naive T'= c('TCF7', 'LEF1', 'NUCB2', 'LDHB'),
+'Proliferating T'= c('PCLAF', 'CD8B', 'CD3D', 'TRAC', 'CLSPN'),
+'CD8 TCM'= c('CD8A', 'SELL', 'ITGB1', 'CD8'),
+'gDT'= c('TRDC', 'TRGV9', 'TRDV2', 'KLRD1'),
+'MAIT'= c('KLRB1', 'NKG7', 'GZMK', 'SLC4A10', 'NCR3', 'CTSW', 'KLRG1', 'CEBPD', 'DUSP2'),
+'NK'= c('STMN1', 'KLRC2', 'S100A4', 'CD3E', 'CST7'),
+'Plasmablast'= c('TYMS', 'TK1', 'ASPM', 'SHCBP1', 'TPX2'),
+'Platelet'= c('GNG11', 'PPBP', 'NRGN', 'PF4', 'TUBB1', 'CLU'),
+'Treg'= c('B2M', 'FOXP3', 'RTKN2', 'TIGIT', 'CTLA4'),
+'Basophil'= c('KIT', 'CPA3', 'TPSAB1', 'CD44', 'GATA2', 'GRAP2')
+)
+
+plot_list <- lapply(names(markers), function(x){
+  DotPlot(
+    seurat_obj,
+    features = markers[[x]],
+  ) + coord_flip() + ggtitle(x)
+})
+
+pdf(paste0(fig_dir, 'dotplot_markers.pdf'), width=6, height=3)
+for(p in plot_list){
+  print(p)
+}
+dev.off()
+
+# load annotations
+annotations <- read.table(paste0(data_dir, 'pbmc_annotations.txt'), header=TRUE, sep='\t')
+ix <- match(seurat_obj$seurat_clusters_RNA, annotations$seurat_cluster)
+seurat_obj$annotation <- annotations$annotation[ix]
+seurat_obj$cell_type <- annotations$cell_type[ix]
+
+# plot clusters and samples on the UMAP
+p1 <- DimPlot(seurat_obj, group.by = 'cell_type', label=TRUE, reduction='umap_RNA') +
+  umap_theme() + NoLegend()
+p2 <- DimPlot(seurat_obj, group.by = 'annotation', label=TRUE, reduction='umap_RNA') +
+  umap_theme() + NoLegend()
+
+pdf(paste0(fig_dir, 'umap_RNA_annotated.pdf'), width=8, height=4)
+p1 | p2
+dev.off()
+
+saveRDS(seurat_obj, file = paste0(data_dir, 'PBMC_masseq_processed_seurat.rds'))
+
+
+```
+
+Get cluster marker genes using FindAllMarkers
+
+Want to try to use a set of input features for hdWGCNA consisting of all the isoforms of cell type
+markers!!!
+
+```{r eval=FALSE}
+
+seurat_obj <- readRDS(file = paste0(data_dir, 'PBMC_masseq_processed_seurat.rds'))
+DefaultAssay(seurat_obj) <- 'RNA'
+table(seurat_obj$cell_type)
+
+Idents(seurat_obj) <- seurat_obj$annotation
+
+cluster_markers <- FindAllMarkers(
+  seurat_obj,
+  logfc.threshold = 0.5,
+  min.pct = 0.1
+)
+table(cluster_markers$cluster)
+
+write.csv(cluster_markers, quote=FALSE, file=paste0(data_dir, 'cluster_markers.csv'))
+cluster_markers <- read.csv(file=paste0(data_dir, 'cluster_markers.csv'))
+marker_genes <- unique(cluster_markers$gene)
+
+DefaultAssay(seurat_obj) <- 'iso'
+
+iso_names <- rownames(seurat_obj)
+gene_names <- do.call(rbind, strsplit(iso_names, '[.]'))[,1]
+iso_df <- data.frame(
+  iso = iso_names,
+  gene = gene_names
+)
+
+# iso_df <- subset(iso_df, gene %in% marker_genes)
+# dim(iso_df)
+# table(iso_df$gene) %>% range
+# length(unique(iso_df$gene))
+
+# marker_genes <- cluster_markers %>% subset(cluster %in% c('Memory B', 'Naive B')) %>% .$gene %>% unique
+
+# subset to remove the smallest cell types
+seurat_obj <- seurat_obj[,!(seurat_obj$annotation %in% c('DC', 'Platelet'))]
+
+# need to find a way to filter out transcripts that have very low expression levels
+X <- GetAssayData(seurat_obj, assay='iso', slot='data')
+pseudobulks <- Libra::to_pseudobulk(
+  X, meta = seurat_obj@meta.data,
+  cell_type_col = 'annotation',
+  replicate_col = 'Sample',
+  label_col = 'Sample',
+  min_reps=0
+)
+
+cluster_markers <- subset(cluster_markers, !(cluster %in% c('DC', 'Platelet')))
+
+# number of marker genes per cluster
+n_markers <- 150
+
+# remove isoforms with really low expression
+selected_isoforms <- c()
+for(cur_group in names(pseudobulks)){
+  print(cur_group)
+  cur_pb <- pseudobulks[[cur_group]]
+  table(rowSums(cur_pb) > 10)
+  cur_isos <- rownames(cur_pb[rowSums(cur_pb) > 10,])
+  cur_iso_df <- subset(iso_df, iso %in% cur_isos)
+  cur_markers <- subset(cluster_markers, cluster == cur_group) %>% slice_max(n=n_markers, order_by=avg_log2FC) %>% .$gene
+  cur_genes <- unique(cur_iso_df$gene)
+  cur_genes <- cur_genes[cur_genes %in% cur_markers]
+  length(cur_genes)
+  cur_iso_df <- subset(cur_iso_df, gene %in% cur_genes)
+  print(length(cur_iso_df$iso))
+  selected_isoforms <- c(selected_isoforms, cur_iso_df$iso)
+}
+
+selected_iso_df <- subset(iso_df, iso %in% selected_isoforms)
+quantile(table(selected_iso_df$gene))
+
+selected_isoforms <- unique(selected_isoforms)
+print(length(selected_isoforms))
+
+#####################################################
+# Get Major isoform for each gene in each cell type
+#####################################################
+
+proportion_thresh <- 0.8
+lowcount_thresh <- 25
+selected_isoforms <- c()
+major_list <- list()
+for(cur_group in names(pseudobulks)){
+  print(cur_group)
+  cur_pb <- pseudobulks[[cur_group]]
+  cur_pb_genes <- do.call(rbind, strsplit(rownames(cur_pb), '[.]'))[,1]
+
+  # loop through each gene:
+  major_isos <- sapply(unique(iso_df$gene), function(cur_gene){
+    cur_iso_df <- subset(iso_df, gene == cur_gene)
+    if(nrow(cur_iso_df) == 1){
+      return(cur_iso_df$iso)
+    }
+
+    cur_iso_pb <- cur_pb[cur_pb_genes == cur_gene,]
+    cur_iso_sum  <- rowSums(cur_iso_pb)
+    cur_iso_prop <- cur_iso_sum / sum(cur_iso_sum)
+
+    # don't consider isoforms with very few counts
+    ix <- cur_iso_sum > lowcount_thresh
+    cur_iso_sum <- cur_iso_sum[ix]
+    if(length(cur_iso_sum) == 0){
+      return()
+    }
+
+    # order isoforms from high to low:
+    cur_iso_prop <- cur_iso_prop[rev(order(cur_iso_prop))]
+
+    # identify the set of genes that reach the chosen propotion
+    prop_sums <- sapply(1:length(cur_iso_prop), function(i){
+      sum(cur_iso_prop[1:i])
+    })
+    ix <- min(which(prop_sums >= proportion_thresh))
+
+    # return the set of major isoforms
+    names(cur_iso_prop[cur_iso_prop >= cur_iso_prop[ix]])
+
+  })
+  major_list[[cur_group]] <- as.character(unlist(major_isos))
+
+}
+
+sapply(major_list, function(x){length(x)})
+length(unique(unlist(major_list)))
+
+```
+
+hdWGCNA analysis on this dataset
+
+```{r eval=FALSE}
+
+seurat_obj <- readRDS(file = paste0(data_dir, 'PBMC_masseq_processed_seurat.rds'))
+
+# change to isoform assay:
+DefaultAssay(seurat_obj) <- 'iso'
+
+# subset to remove the smallest cell types
+seurat_obj <- seurat_obj[,!(seurat_obj$annotation %in% c('DC', 'Platelet'))]
+
+# setup for WGCNA
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = "custom",
+  gene_list = selected_isoforms,
+  wgcna_name = "marker_genes",
+)
+length(GetWGCNAGenes(seurat_obj))
+
+# construct metacells:
+seurat_obj <- MetacellsByGroups(
+  seurat_obj = seurat_obj,
+  group.by = c("annotation", "cell_type", "Sample"),
+  k = 50,
+  max_shared=25,
+  min_cells=75,
+  reduction = 'harmony_RNA',
+  ident.group = 'annotation',
+  assay = 'iso',
+  mode = 'sum',
+  target_metacells=150
+)
+
+mobj <- GetMetacellObject(seurat_obj)
+table(mobj$cell_type)
+
+# remove the really small groups:
+#mobj <- subset(mobj, annotation %in% c('DC', 'Platelet'))
+
+table(mobj$annotation)
+dim(mobj)
+
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+
+
+
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group.by='cell_type',
+  group_name = unique(seurat_obj$cell_type),
+  use_metacells=TRUE,
+  slot = 'data',
+  assay = 'iso'
+)
+length(GetWGCNAGenes(seurat_obj))
+#
+# genes_use <- GetWGCNAGenes(seurat_obj)
+# datExpr <- as.data.frame(
+#   Seurat::GetAssayData(
+#     mobj,
+#     slot='data'
+#   )[genes_use,]
+# )
+# datExpr <- as.data.frame(t(datExpr))
+#
+# all(genes_use %in% colnames(datExpr))
+#
+#
+# gene_list = genes_use[WGCNA::goodGenes(datExpr)]
+# all.equal(gene_list, colnames(datExpr))
+# all(gene_list %in% colnames(datExpr))
+#
+# length(gene_list)
+# wtf <- gene_list[which(gene_list != colnames(datExpr))]
+# wtf %in% genes_use
+# datExpr <- datExpr[,gene_list]
+
+
+seurat_obj <- TestSoftPowers(
+  seurat_obj,
+  setDatExpr = FALSE
+)
+
+# plot the results:
+plot_list <- PlotSoftPowers(seurat_obj)
+
+# assemble with patchwork
+pdf(paste0(fig_dir, 'test_softpower_all_iso.pdf'), width=12, height=9)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+
+
+# construct wgcna network:
+seurat_obj <- ConstructNetwork(
+  seurat_obj,
+  soft_power=6,
+  setDatExpr=FALSE,
+  detectCutHeight=0.995,
+  mergeCutHeight=0.05,
+  TOM_name = 'marker_genes',
+  minModuleSize=30,
+  overwrite_tom = TRUE
+)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "markers_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_obj, main='hdWGCNA Dendrogram')
+dev.off()
+
+# have to have this ScaleData line or else Harmony gets angry
+seurat_obj <- ScaleData(seurat_obj, features=rownames(seurat_obj)[1:100])
+seurat_obj <- ModuleEigengenes(
+  seurat_obj,
+  group.by.vars = 'Sample',
+  verbose=TRUE
+)
+
+# compute module connectivity:
+seurat_obj <- ModuleConnectivity(
+  seurat_obj
+)
+
+
+
+
+
+
+p <- PlotKMEs(seurat_obj, ncol=4)
+pdf(paste0(fig_dir, 'markers_kME_distributions.pdf'), width=12 , height=8)
+p
+dev.off()
+
+
+
+
+
+plot_list <- ModuleFeaturePlot(
+  seurat_obj,
+  order=TRUE,
+  raster=TRUE,
+  raster_dpi=400, alpha=1, restrict_range=TRUE,
+  reduction = 'umap_RNA'
+)
+
+pdf("figures/featureplot_MEs.pdf",height=10, width=15)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+
+
+MEs <- GetMEs(seurat_obj)
+modules <- GetModules(seurat_obj)
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+
+meta <- seurat_obj@meta.data
+seurat_obj@meta.data <- cbind(meta, MEs)
+
+
+# make dotplot
+p <- DotPlot(
+  seurat_obj,
+  group.by='annotation',
+  features = rev(mods)
+) + RotatedAxis() +
+  scale_color_gradient2(high='red', mid='grey95', low='blue') + xlab('') + ylab('') +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=1)
+  )
+
+pdf(paste0(fig_dir, 'dotplot_MEs.pdf'), width=8, height=4)
+p
+dev.off()
+
+seurat_obj@meta.data <- meta
+
+
+
+
+
+
+
+
+
+seurat_obj <- RunModuleUMAP(
+  seurat_obj,
+  n_hubs =5,
+  n_neighbors=15,
+  min_dist=0.2,
+  spread=1
+  #supervised=TRUE,
+  #target_weight=0.5
+)
+
+
+# get the hub gene UMAP table from the seurat object
+umap_df <- GetModuleUMAP(
+  seurat_obj
+)
+
+# plot with ggplot
+p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(
+   color=umap_df$color,
+   size=umap_df$kME*2
+  ) +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'test_hubgene_umap_ggplot_uns.pdf'), width=5, height=5)
+p
+dev.off()
+
+library(igraph)
+pdf(paste0(fig_dir, 'marker_coex_umap.pdf'), width=8, height=8)
+ModuleUMAPPlot(
+  seurat_obj,
+  edge.alpha=0.5,
+  sample_edges=TRUE,
+  keep_grey_edges=FALSE,
+  edge_prop=0.075, # taking the top 20% strongest edges in each module
+#   label_genes = umap_df$isoform_name[umap_df$gene_name %in% plot_genes],
+  #label_genes = c(''),
+  label_hubs=2 # how many hub genes to plot per module?
+)
+dev.off()
+
+# individual module networks
+ModuleNetworkPlot(
+  seurat_obj,
+  mods = "all",
+  #label_center=TRUE,
+  outdir = paste0(fig_dir, 'hubNetworks/')
+)
+
+
+saveRDS(seurat_obj, file = paste0(data_dir, 'PBMC_masseq_hdWGCNA.rds'))
+seurat_obj <- readRDS(file = paste0(data_dir, 'PBMC_masseq_hdWGCNA.rds'))
+
+
+```
+
+
+
+
+
+isoforms that cross modules
+
+```{r eval=FALSE}
+
+modules <- GetModules(seurat_obj)
+color_df <- modules %>% subset(module!='grey') %>%
+  select(c(module, color)) %>% distinct %>%
+  rename(c(group=module, colour=color))
+cp <- color_df$colour; names(cp) <- color_df$group
+
+modules <- dplyr::rename(modules, c(isoform_name = gene_name))
+modules$gene_name <- do.call(rbind, strsplit(modules$isoform_name, '[.]'))[,1]
+modules <- subset(modules, module != 'grey')
+
+
+mod_iso <- table(modules$gene_name, modules$module)
+mod_iso[mod_iso > 1] <- 1
+
+multimod_genes <- names(which(Matrix::rowSums(mod_iso) > 1))
+
+multimod_df <- subset(modules, gene_name %in% multimod_genes)
+table(multimod_df$gene)
+length(unique(multimod_df$gene))
+
+subset(multimod_df, gene_name == 'Gfap')
+
+# write it to a file:
+multimod_df %>% dplyr::select(c(isoform_name, gene_name, module, color)) %>%
+  write.csv(file=paste0(data_dir, 'multimod_genes.csv'), quote=FALSE, row.names=FALSE)
+
+
+  ################################################################################
+  # how many genes have 1 isoform, all isoforms in the same module, isoforms split
+  # across modules?
+  ################################################################################
+
+  # total number of genes:
+  n_genes <- modules$gene_name %>% unique %>% length
+
+  # number of genes with one isoform:
+  one_iso <- names(which(table(modules$gene_name) == 1))
+
+  n_one <- length(one_iso)
+  n_multi_split <- length(multimod_genes)
+  n_multi_same <- n_genes - n_one - n_multi_split
+
+  data <- data.frame(
+    category = c('one isoform', 'multi iso, same module', 'mutli iso, diff modules'),
+    count = c(n_one, n_multi_same, n_multi_split)
+  )
+
+
+  # Compute percentages
+  data$fraction <- data$count / sum(data$count)
+
+  # Compute the cumulative percentages (top of each rectangle)
+  data$ymax <- cumsum(data$fraction)
+
+  # Compute the bottom of each rectangle
+  data$ymin <- c(0, head(data$ymax, n=-1))
+
+  # Compute label position
+  data$labelPosition <- (data$ymax + data$ymin) / 2
+
+
+  # percentage:
+  data$percent <- paste0(signif(data$fraction * 100, 3), "%")
+
+  # Compute a good label
+  data$label <- paste0(data$category, "\n", data$percent)
+
+  # Make the plot
+  p <- ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=category)) +
+    geom_rect() +
+    geom_text( x=2, aes(y=labelPosition, label=label), size=5, color='black') + # x here controls label position (inner / outer)
+    scale_fill_brewer(palette=4) +
+    coord_polar(theta="y") +
+    xlim(c(0, 4)) +
+    theme_void() +
+    theme(legend.position = "none")
+
+
+  pdf(paste0(fig_dir, 'donut_multimod.pdf'), width=5, height=5)
+  p
+  dev.off()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+Perform basic clustering analysis of the MAS-Seq PBMC dataset on the iso assay
+
+```{r eval=FALSE}
+
+# set assay to iso
+DefaultAssay(seurat_obj) <- 'iso'
+
+################################################################################
+# 2. Normalization, Scaling, and linear dimensionality reduction
+################################################################################
+
+seurat_obj <- seurat_obj %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA(reduction.name='pca_iso')
+
+# run harmony
+seurat_obj <- RunHarmony(
+  seurat_obj,
+  group.by.vars = 'Sample',
+  reduction='pca_iso',
+  assay.use = 'iso',
+  reduction.save = 'harmony_iso'
+)
+
+################################################################################
+# 3. Non-linear dim reduction and clustering
+################################################################################
+
+# UMAP
+seurat_obj <- RunUMAP(
+  seurat_obj,
+  dims=1:30,
+  min.dist=0.3,
+  reduction='harmony_iso',
+  reduction.name='umap_iso'
+)
+
+
+# clustering
+seurat_obj <- FindNeighbors(
+  seurat_obj, dims = 1:30,
+  reduction='harmony_iso', graph.name = c('iso_nn', 'iso_snn')
+)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5, graph.name='iso_snn')
+seurat_obj$seurat_clusters_iso <- seurat_obj$seurat_clusters
+
+
+################################################################################
+# 4. Plotting
+################################################################################
+
+# plot clusters and samples on the UMAP
+p1 <- DimPlot(seurat_obj, group.by = 'seurat_clusters_iso', label=TRUE, reduction='umap_iso') +
+  umap_theme() + NoLegend()
+p2 <- DimPlot(seurat_obj, group.by = 'Sample', label=TRUE, reduction='umap_iso') +
+  umap_theme() + NoLegend()
+p3 <- FeaturePlot(seurat_obj, features='nCount_iso', reduction='umap_iso') + umap_theme()
+
+pdf(paste0(fig_dir, 'umap_iso3.pdf'), width=12, height=4)
+p1 | p2 | p3
+dev.off()
+
+
+
+```
+
+
+WNN analysis
+
+```{r eval=FALSE}
+
+DefaultAssay(seurat_obj) <- 'RNA'
+
+seurat_obj <- FindMultiModalNeighbors(
+  seurat_obj, reduction.list = list("harmony_RNA", "harmony_iso"),
+  dims.list = list(1:30, 1:30), modality.weight.name = "RNA.weight"
+)
+
+seurat_obj <- RunUMAP(
+  seurat_obj,
+  nn.name = "weighted.nn",
+  reduction.name = "wnn.umap",
+  reduction.key = "wnnUMAP_"
+)
+seurat_obj <- FindClusters(
+  seurat_obj,
+  graph.name = "wsnn",
+  algorithm = 3,
+  resolution = 0.5,
+  verbose = FALSE
+)
+seurat_obj$seurat_clusters_wnn <- seurat_obj$seurat_clusters
+
+
+################################################################################
+# 4. Plotting
+################################################################################
+
+# plot clusters and samples on the UMAP
+p1 <- DimPlot(seurat_obj, group.by = 'seurat_clusters_wnn', label=TRUE, reduction='wnn.umap') +
+  umap_theme() + NoLegend()
+p2 <- DimPlot(seurat_obj, group.by = 'Sample', label=TRUE, reduction='wnn.umap') +
+  umap_theme() + NoLegend()
+p3 <- FeaturePlot(seurat_obj, features='nCount_iso', reduction='wnn.umap') + umap_theme()
+
+pdf(paste0(fig_dir, 'umap_wnn.pdf'), width=12, height=4)
+p1 | p2 | p3
+dev.off()
+
+```

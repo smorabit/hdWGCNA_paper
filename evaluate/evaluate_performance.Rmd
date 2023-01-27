@@ -1008,3 +1008,103 @@ dev.off()
 
 
 ```
+
+Test new version of ConstructNetwork
+
+```{r eval=FALSE}
+
+seurat_obj <- ConstructNetwork(
+  seurat_obj,
+  tom_name = paste0('test')
+)
+
+seurat_obj <- ModuleEigengenes(seurat_obj)
+
+modules <- GetModules(seurat_obj, wgcna_name='ODC')
+
+seurat_obj <- ModuleConnectivity(
+  seurat_obj,
+  group.by = 'cell_type',
+  group_name = 'ODC',
+  sparse=TRUE,
+  wgcna_name = 'ODC',
+  harmonized=FALSE
+)
+
+
+```
+
+
+
+
+Attempting to make co-expression matrix with sparse calculataions
+JK this is probably a complete waste of time
+
+chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/Consensus-NetworkConstruction-blockwise.pdf
+
+```{r eval=FALSE}
+
+
+# get modules and MEs
+wgcna_name <- 'INH'
+group.by <- 'cell_type'; group_name <- 'INH'
+
+TOM_hdwgcna <- GetTOM(seurat_obj, wgcna_name = 'INH')
+
+modules <- GetModules(seurat_obj, wgcna_name)
+MEs <- GetMEs(seurat_obj, harmonized=TRUE, wgcna_name)
+cells.use <- seurat_obj@meta.data %>% subset(get(group.by) %in% group_name) %>% rownames
+genes_use <- GetWGCNAGenes(seurat_obj, wgcna_name)
+
+# get expression data:
+exp_mat <- GetAssayData(
+  seurat_obj,
+  assay='RNA',
+  slot='data'
+)[genes_use,cells.use]
+datExpr <- t(as.matrix(exp_mat))
+exp_mat <- t(exp_mat)
+
+class(exp_mat)
+
+# pick a random softpower
+soft_power <- 6
+
+# calculate adjacency matrix
+# adjacency <- abs(WGCNA::bicor(exp_mat))^soft_power
+# adjacency <- abs(qlcMatrix::corSparse(exp_mat))^soft_power
+adjacency <- abs(cor(exp_mat, use = 'p'))^soft_power
+
+# calculate TOM similarity of this adjacency matrix:
+TOM <- WGCNA::TOMsimilarity(adjacency)
+rownames(TOM) <- genes_use; colnames(TOM) <- genes_use;
+
+# clustering based on the TOM:
+consTree <- hclust(as.dist(1 - TOM), method = 'average')
+
+deepSplit = 4
+pamStage=FALSE
+detectCutHeight = 0.995
+minModuleSize = 30
+mergeCutHeight = 0.2
+
+unmerged_labels <- dynamicTreeCut::cutreeDynamic(
+  dendro = consTree,
+  distM = 1 - TOM,
+  deepSplit = deepSplit,
+  cutHeight = detectCutHeight,
+  minClusterSize = minModuleSize,
+  pamRespectsDendro = pamStage
+)
+
+unmerged_colors <- WGCNA::labels2colors(unmerged_labels)
+table(unmerged_labels)
+
+
+
+# how similar are the TOMs?
+df1 <- reshape2::melt(TOM)
+df2 <- reshape2::melt(TOM_hdwgcna)
+
+
+```
