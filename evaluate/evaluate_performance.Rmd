@@ -1009,7 +1009,7 @@ dev.off()
 
 ```
 
-Test new version of ConstructNetwork
+Test new version of 
 
 ```{r eval=FALSE}
 

@@ -784,6 +784,551 @@ multimod_df %>% dplyr::select(c(isoform_name, gene_name, module, color)) %>%
 
 ```
 
+Example 2: Using major isoforms in one cell type
+
+```{r eval=FALSE}
+
+seurat_obj <- readRDS(file = paste0(data_dir, 'PBMC_masseq_processed_seurat.rds'))
+DefaultAssay(seurat_obj) <- 'RNA'
+
+# subset to remove the smallest cell types
+seurat_obj <- seurat_obj[,!(seurat_obj$annotation %in% c('DC', 'Platelet'))]
+
+
+iso_names <- rownames(seurat_obj)
+gene_names <- do.call(rbind, strsplit(iso_names, '[.]'))[,1]
+iso_df <- data.frame(
+  iso = iso_names,
+  gene = gene_names
+)
+
+X <- GetAssayData(seurat_obj, assay='iso', slot='data')
+pseudobulks <- Libra::to_pseudobulk(
+  X, meta = seurat_obj@meta.data,
+  cell_type_col = 'annotation',
+  replicate_col = 'Sample',
+  label_col = 'Sample',
+  min_reps=0
+)
+
+#####################################################
+# Get Major isoform for each gene in each cell type
+#####################################################
+
+proportion_thresh <- 0.8
+lowcount_thresh <- 25
+selected_isoforms <- c()
+major_list <- list()
+for(cur_group in names(pseudobulks)){
+  print(cur_group)
+  cur_pb <- pseudobulks[[cur_group]]
+  cur_pb_genes <- do.call(rbind, strsplit(rownames(cur_pb), '[.]'))[,1]
+
+  # loop through each gene:
+  major_isos <- sapply(unique(iso_df$gene), function(cur_gene){
+    cur_iso_df <- subset(iso_df, gene == cur_gene)
+    if(nrow(cur_iso_df) == 1){
+      return(cur_iso_df$iso)
+    }
+
+    cur_iso_pb <- cur_pb[cur_pb_genes == cur_gene,]
+    cur_iso_sum  <- rowSums(cur_iso_pb)
+    cur_iso_prop <- cur_iso_sum / sum(cur_iso_sum)
+
+    # don't consider isoforms with very few counts
+    ix <- cur_iso_sum > lowcount_thresh
+    cur_iso_sum <- cur_iso_sum[ix]
+    if(length(cur_iso_sum) == 0){
+      return()
+    }
+
+    # order isoforms from high to low:
+    cur_iso_prop <- cur_iso_prop[rev(order(cur_iso_prop))]
+
+    # identify the set of genes that reach the chosen propotion
+    prop_sums <- sapply(1:length(cur_iso_prop), function(i){
+      sum(cur_iso_prop[1:i])
+    })
+    ix <- min(which(prop_sums >= proportion_thresh))
+
+    # return the set of major isoforms
+    names(cur_iso_prop[cur_iso_prop >= cur_iso_prop[ix]])
+
+  })
+  major_list[[cur_group]] <- as.character(unlist(major_isos))
+
+}
+
+sapply(major_list, function(x){length(x)})
+selected_isoforms <- unique(unlist(major_list))
+length(selected_isoforms)
+
+all(as.character(major_list[['NK']]) %in% rownames(seurat_obj))
+
+# subset major isoforms that are marker genes:
+major_marker_list <- lapply(names(major_list), function(cur_group){
+  cur_isos <- major_list[[cur_group]]
+  cur_genes <- unique( do.call(rbind, strsplit(cur_isos, '[.]'))[,1])
+  cur_genes <- subset(cluster_markers, cluster == cur_group & gene %in% cur_genes) %>% .$gene
+  subset(iso_df, gene %in% cur_genes & iso %in% cur_isos) %>% .$iso
+})
+names(major_marker_list) <- names(major_list)
+sapply(major_marker_list, function(x){length(x)})
+selected_isoforms <- unique(unlist(major_marker_list))
+length(selected_isoforms)
+
+#####################################################
+# Run hdWGCNA on major marker isos
+#####################################################
+
+# setup for WGCNA
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = "custom",
+  gene_list = selected_isoforms,
+  wgcna_name = "major_iso",
+)
+length(GetWGCNAGenes(seurat_obj))
+
+# construct metacells:
+seurat_obj <- MetacellsByGroups(
+  seurat_obj = seurat_obj,
+  group.by = c("annotation", "cell_type", "Sample"),
+  k = 50,
+  max_shared=25,
+  min_cells=75,
+  reduction = 'harmony_RNA',
+  ident.group = 'annotation',
+  assay = 'iso',
+  mode = 'sum',
+  target_metacells=150
+)
+
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+mobj <- GetMetacellObject(seurat_obj)
+
+
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group.by='annotation',
+  group_name = unique(mobj$annotation),
+  use_metacells=TRUE,
+  slot = 'data',
+  assay = 'iso'
+)
+length(GetWGCNAGenes(seurat_obj))
+
+#
+# genes_use <- GetWGCNAGenes(seurat_obj)
+# datExpr <- as.data.frame(
+#   Seurat::GetAssayData(
+#     mobj,
+#     slot='data'
+#   )[genes_use,]
+# )
+# datExpr <- as.data.frame(t(datExpr))
+#
+# all(genes_use %in% colnames(datExpr))
+#
+#
+# gene_list = genes_use[WGCNA::goodGenes(datExpr)]
+# all.equal(gene_list, colnames(datExpr))
+# all(gene_list %in% colnames(datExpr))
+#
+# length(gene_list)
+# wtf <- gene_list[which(gene_list != colnames(datExpr))]
+# wtf %in% genes_use
+# datExpr <- datExpr[,gene_list]
+
+
+seurat_obj <- TestSoftPowers(
+  seurat_obj,
+  setDatExpr = FALSE
+)
+
+# plot the results:
+plot_list <- PlotSoftPowers(seurat_obj)
+
+# assemble with patchwork
+pdf(paste0(fig_dir, 'test_softpower_major.pdf'), width=12, height=9)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+
+# construct wgcna network:
+seurat_obj <- ConstructNetwork(
+  seurat_obj,
+  setDatExpr=FALSE,
+  detectCutHeight=0.995,
+  mergeCutHeight=0.05,
+  TOM_name = 'major_iso',
+  minModuleSize=30,
+  overwrite_tom = TRUE
+)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "major_iso_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_obj, main='hdWGCNA Dendrogram')
+dev.off()
+
+# have to have this ScaleData line or else Harmony gets angry
+seurat_obj <- ScaleData(seurat_obj, features=rownames(seurat_obj)[1:100])
+seurat_obj <- ModuleEigengenes(
+  seurat_obj,
+  group.by.vars = 'Sample',
+  verbose=TRUE
+)
+
+
+# compute module connectivity:
+seurat_obj <- ModuleConnectivity(
+  seurat_obj,
+  reassign_modules = FALSE
+)
+
+
+
+
+
+
+p <- PlotKMEs(seurat_obj, ncol=4)
+pdf(paste0(fig_dir, 'major_iso_kME_distributions.pdf'), width=12 , height=8)
+p
+dev.off()
+
+
+
+
+
+plot_list <- ModuleFeaturePlot(
+  seurat_obj,
+  order=TRUE,
+  raster=TRUE,
+  raster_dpi=400, alpha=1, restrict_range=TRUE,
+  reduction = 'umap_RNA'
+)
+
+pdf("figures/major_iso_featureplot_MEs.pdf",height=10, width=15)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+
+
+MEs <- GetMEs(seurat_obj)
+modules <- GetModules(seurat_obj)
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+
+meta <- seurat_obj@meta.data
+seurat_obj@meta.data <- cbind(meta, MEs)
+
+
+# make dotplot
+p <- DotPlot(
+  seurat_obj,
+  group.by='annotation',
+  features = rev(mods)
+) + RotatedAxis() +
+  scale_color_gradient2(high='red', mid='grey95', low='blue') + xlab('') + ylab('') +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=1)
+  )
+
+pdf(paste0(fig_dir, 'major_iso_dotplot_MEs.pdf'), width=8, height=4)
+p
+dev.off()
+
+seurat_obj@meta.data <- meta
+
+
+
+
+
+
+
+
+
+seurat_obj <- RunModuleUMAP(
+  seurat_obj,
+  n_hubs =5,
+  n_neighbors=15,
+  min_dist=0.2,
+  spread=1
+  #supervised=TRUE,
+  #target_weight=0.5
+)
+
+
+# get the hub gene UMAP table from the seurat object
+umap_df <- GetModuleUMAP(
+  seurat_obj
+)
+
+# plot with ggplot
+p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(
+   color=umap_df$color,
+   size=umap_df$kME*2
+  ) +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'major_iso_hubgene_umap_ggplot_uns.pdf'), width=5, height=5)
+p
+dev.off()
+
+library(igraph)
+pdf(paste0(fig_dir, 'major_iso_coex_umap.pdf'), width=8, height=8)
+ModuleUMAPPlot(
+  seurat_obj,
+  edge.alpha=0.5,
+  sample_edges=TRUE,
+  keep_grey_edges=FALSE,
+  edge_prop=0.075, # taking the top 20% strongest edges in each module
+#   label_genes = umap_df$isoform_name[umap_df$gene_name %in% plot_genes],
+  #label_genes = c(''),
+  label_hubs=2 # how many hub genes to plot per module?
+)
+dev.off()
+
+
+# individual module networks
+ModuleNetworkPlot(
+  seurat_obj,
+  mods = "all",
+  #label_center=TRUE,
+  outdir = paste0(fig_dir, 'hubNetworks/')
+)
+
+
+saveRDS(seurat_obj, file = paste0(data_dir, 'PBMC_masseq_major_hdWGCNA.rds'))
+seurat_obj <- readRDS(file = paste0(data_dir, 'PBMC_masseq_hdWGCNA_major.rds'))
+
+
+```
+
+ggnetwork
+
+can't subset like I was doing for igraph, need to go into the adjacency matrix and
+replace with zeros ...
+
+```{r eval=FALSE}
+
+library(ggnetwork)
+library(sna)
+
+n <- network(rgraph(10, tprob = 0.2), directed = FALSE)
+
+n %v% "family" <- sample(letters[1:3], 10, replace = TRUE)
+n %v% "importance" <- sample(1:3, 10, replace = TRUE)
+
+e <- network.edgecount(n)
+set.edge.attribute(n, "type", sample(letters[24:26], e, replace = TRUE))
+set.edge.attribute(n, "day", sample(1:3, e, replace = TRUE))
+
+ggnetwork(n, layout = "fruchtermanreingold", cell.jitter = 0.75)
+ggnetwork(n, layout = "target", niter = 100)
+
+p <- ggplot(n, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_edges(aes(linetype = type), color = "grey50") +
+  geom_nodes(aes(color = family, size = importance)) +
+  theme_blank()
+
+pdf(paste0(fig_dir, 'test_ggnet.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+##############################
+#
+
+seurat_obj,
+sample_edges = TRUE
+edge_prop = 0.2
+label_hubs = 5
+edge.alpha=0.25
+vertex.label.cex=0.5
+label_genes = NULL
+return_graph = FALSE
+keep_grey_edges = TRUE
+wgcna_name=NULL
+
+
+if(is.null(wgcna_name)){wgcna_name <- seurat_obj@misc$active_wgcna}
+
+# get the TOM
+TOM <- GetTOM(seurat_obj, wgcna_name)
+
+# get modules,
+modules <- GetModules(seurat_obj, wgcna_name)
+
+# get the UMAP df:
+umap_df <- GetModuleUMAP(seurat_obj, wgcna_name)
+mods <- levels(umap_df$module)
+mods <- mods[mods != 'grey']
+
+# subset the TOM:
+subset_TOM <- TOM[umap_df$gene, umap_df$gene[umap_df$hub == 'hub']]
+
+test <- rgraph(10, tprob = 0.2)
+
+hubs <- GetHubGenes(seurat_obj)
+
+n <- network(TOM[hubs$gene_name, hubs$gene_name], directed = FALSE)
+
+n %v% "module" <- as.character(hubs$module)
+n %v% "kME" <- hubs$kME
+
+e <- network.edgecount(n)
+#set.edge.attribute(n, "type", sample(letters[24:26], e, replace = TRUE))
+#set.edge.attribute(n, "day", sample(1:3, e, replace = TRUE))
+
+
+p <- ggplot(n, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_edges(color = "grey50") +
+  geom_nodes(aes(color = module, size = kME)) +
+  theme_blank()
+
+pdf(paste0(fig_dir, 'test_ggnet2.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+
+
+
+
+
+
+
+
+
+
+
+# genes to label:
+# hub_labels <- selected_modules %>% group_by(module) %>% top_n(label_hubs, wt=kME) %>% .$gene_name
+hub_list <- lapply(mods, function(cur_mod){
+  cur <- subset(modules, module == cur_mod)
+  cur[,c('gene_name', paste0('kME_', cur_mod))] %>%
+    top_n(label_hubs) %>% .$gene_name
+})
+names(hub_list) <- mods
+hub_labels <- as.character(unlist(hub_list))
+print('hub labels')
+print(hub_labels)
+print(label_genes)
+if(is.null(label_genes)){
+  label_genes <- hub_labels
+} else{
+  if(!any(label_genes %in% umap_df$gene)){
+    stop("Some genes in label_genes not found in the UMAP.")
+  }
+  label_genes <- unique(c(label_genes, hub_labels))
+}
+print(label_genes)
+
+# subset module df by genes in the UMAP df:
+selected_modules <- modules[umap_df$gene,]
+selected_modules <- cbind(selected_modules, umap_df[,c('UMAP1', 'UMAP2', 'hub', 'kME')])
+
+selected_modules$label <- ifelse(selected_modules$gene_name %in% label_genes, selected_modules$gene_name, '')
+selected_modules$fontcolor <- ifelse(selected_modules$color == 'black', 'gray50', 'black')
+
+# set frome color
+# same color as module for all genes, black outline for the selected hub genes
+selected_modules$framecolor <- ifelse(selected_modules$gene_name %in% label_genes, 'black', selected_modules$color)
+
+# melt TOM into long format
+edge_df <- subset_TOM %>% reshape2::melt()
+print(dim(edge_df))
+
+# set color of each edge based on value:
+edge_df$color <- future.apply::future_sapply(1:nrow(edge_df), function(i){
+  gene1 = as.character(edge_df[i,'Var1'])
+  gene2 = as.character(edge_df[i,'Var2'])
+
+  col1 <- selected_modules[selected_modules$gene_name == gene1, 'color']
+  col2 <- selected_modules[selected_modules$gene_name == gene2, 'color']
+
+  if(col1 == col2){
+    col = col1
+  } else{
+    col = 'grey90'
+  }
+  col
+})
+
+# keep grey edges?
+if(!keep_grey_edges){
+  edge_df <- edge_df %>% subset(color != 'grey90')
+}
+
+# subset edges:
+groups <- unique(edge_df$color)
+if(sample_edges){
+  # randomly sample
+  temp <- do.call(rbind, lapply(groups, function(cur_group){
+    cur_df <- edge_df %>% subset(color == cur_group)
+    n_edges <- nrow(cur_df)
+    cur_sample <- sample(1:n_edges, round(n_edges * edge_prop))
+    cur_df[cur_sample,]
+  }))
+} else{
+
+  # get top strongest edges
+  temp <- do.call(rbind, lapply(groups, function(cur_group){
+    cur_df <- edge_df %>% subset(color == cur_group)
+    n_edges <- nrow(cur_df)
+    cur_df %>% dplyr::top_n(round(n_edges * edge_prop), wt=value)
+  }))
+}
+
+edge_df <- temp
+print(dim(edge_df))
+
+# scale edge values between 0 and 1 for each module
+edge_df <- edge_df %>% group_by(color) %>% mutate(value=scale01(value))
+
+# edges & vertices are plotted in igraph starting with the first row, so re-order s.t. strong edges are on bottom, all gray on the top of the table:
+edge_df <- edge_df %>% arrange(value)
+edge_df <- rbind(
+  subset(edge_df, color == 'grey90'),
+  subset(edge_df, color != 'grey90')
+)
+
+# set alpha of edges based on kME
+edge_df$color_alpha <- ifelse(
+  edge_df$color == 'grey90',
+  alpha(edge_df$color, alpha=edge_df$value/2),
+  alpha(edge_df$color, alpha=edge_df$value)
+)
+
+# re-order vertices so hubs are plotted on top
+selected_modules <- rbind(
+  subset(selected_modules , hub == 'other'),
+  subset(selected_modules , hub != 'other')
+)
+
+# re-order vertices so labeled genes are on top
+selected_modules <- rbind(
+  subset(selected_modules , label == ''),
+  subset(selected_modules , label != '')
+)
+
+# setup igraph:
+g <- igraph::graph_from_data_frame(
+  edge_df,
+  directed=FALSE,
+  vertices=selected_modules
+)
+
+```
+
+
 
 
 
