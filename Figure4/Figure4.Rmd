@@ -1,0 +1,949 @@
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(harmony)
+library(patchwork)
+library(WGCNA)
+library(viridis)
+library(RColorBrewer)
+library(ggpubr)
+library(tictoc)
+library(Hmisc)
+library(igraph)
+library(ggrepel)
+library(hdWGCNA)
+enableWGCNAThreads(nThreads = 8)
+set.seed(12345)
+theme_set(theme_cowplot())
+
+# load custom plotting script
+source("/pub/smorabit/hdWGCNA/bin/spatial_functions.R")
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+
+scripts <- dir("/dfs7/swaruplab/smorabit/analysis/galilean/bin/")
+for(script in scripts){
+  source(paste0("/dfs7/swaruplab/smorabit/analysis/galilean/bin/", script))
+}
+
+# output directories
+fig_dir <- 'figures/'
+data_dir <- 'data/'
+
+
+```
+
+Set up ScISOrSeq dataset
+
+```{r eval=FALSE}
+
+# load ScISOrSeq  dataset:
+iso_X <- Seurat::Read10X("/pub/smorabit/hdWGCNA/isoseq/data/dataSharing_countsPerCell/isoformByCellMatrix/")
+iso_table <- read.delim("/pub/smorabit/hdWGCNA/isoseq/data/dataSharing_countsPerCell/IsoID_TranscriptID_TSS_Intron_PolyA", sep='\t', header=FALSE)
+ct_table <- read.delim("/pub/smorabit/hdWGCNA/isoseq/data/dataSharing_countsPerCell/Barcode_Celltype_Assignments", sep='\t', header=FALSE)
+
+ct_table <- dplyr::rename(ct_table, c(barcode=V1, group=V2))
+ct_table$celltype <- do.call(rbind, strsplit(ct_table$group, '_'))[,2]
+rownames(ct_table) <- ct_table$barcode
+
+# load illumina data:
+rep1_X <- Seurat::Read10X("/pub/smorabit/hdWGCNA/isoseq/data/illumina/rep1/")
+rep2_X <- Seurat::Read10X("/pub/smorabit/hdWGCNA/isoseq/data/illumina/rep2/")
+
+colnames(rep1_X) <- do.call(rbind, strsplit(colnames(rep1_X), '-'))[,1]
+colnames(rep2_X) <- do.call(rbind, strsplit(colnames(rep2_X), '-'))[,1]
+
+s1 <- CreateSeuratObject(rep1_X); s1$barcode <- colnames(s1); s1$rep <- "rep1"
+s2 <- CreateSeuratObject(rep2_X); s2$barcode <- colnames(s2); s2$rep <- "rep2"
+
+seurat_obj <- merge(s1, s2)
+
+# get rid of duplicated barcodes:
+single_barcodes <- table(seurat_obj$barcode) == 1
+single_barcodes <- single_barcodes[seurat_obj$barcode]
+seurat_obj <- seurat_obj[,single_barcodes]
+
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^mt-")
+
+# which cells do we have long read data for?
+seurat_obj$LR <- seurat_obj$barcode %in% colnames(iso_X)
+seurat_obj <- subset(seurat_obj, LR)
+
+# subset to have the same cells as the seurat obj:
+iso_X <- iso_X[,seurat_obj$barcode]
+all.equal(colnames(iso_X), as.character(seurat_obj$barcode))
+
+# make column names the same as the seurat obj
+colnames(iso_X) <- colnames(seurat_obj)
+
+# add the iso assay to the seurat obj
+iso_assay <- Seurat::CreateAssayObject(counts = iso_X)
+seurat_obj[["iso"]] <- iso_assay
+
+# add celltype information:
+head(ct_table)
+ct_table <- ct_table[seurat_obj$barcode,]
+seurat_obj$celltype <- ct_table$celltype
+
+saveRDS(seurat_obj, paste0(data_dir, 'sniso_seurat_unprocessed.rds'))
+
+```
+
+Dimensionality reduction on RNA assay
+
+```{r eval=FALSE}
+
+# re-load unprocessed dataset:
+seurat_obj <- readRDS(paste0(data_dir, 'sniso_seurat_unprocessed.rds'))
+DefaultAssay(seurat_obj) <- 'RNA'
+
+# standard Seurat processing:
+seurat_obj <- seurat_obj %>%
+  NormalizeData() %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA()
+
+# seurat_obj <- RunHarmony(seurat_obj, 'rep')
+seurat_obj <- RunUMAP(seurat_obj, dims=1:30, min.dist=0.3)
+saveRDS(seurat_obj, paste0(data_dir, 'sniso_seurat_processed.rds'))
+
+
+# plot the UMAP
+p <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'annotation',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 200,
+  point_size=0.25,
+  raster_scale=0.5,
+  plot_under=TRUE,
+  plot_theme = umap_theme()
+)
+
+pdf(paste0(fig_dir, 'umap_anno.pdf'), width=7, height=7)
+p
+dev.off()
+
+
+```
+
+Run isoform co-expression network analysis in the radial glia lineage with hdWGCNA
+
+```{r eval=FALSE}
+
+# re-load unprocessed dataset:
+seurat_obj <- readRDS(paste0(data_dir, 'sniso_seurat_processed.rds'))
+
+# add broad annotation
+ct_df <- read.csv('~/pub/hdWGCNA/isoseq/data/sniso_annotation.csv')
+ix <- match(seurat_obj$celltype, ct_df$celltype)
+seurat_obj$annotation <- ct_df$annotation[ix]
+
+# switch to isoform assay
+DefaultAssay(seurat_obj) <- 'iso'
+
+keep <- c('NIPCs', 'ASC', 'RGL', 'Ependymal')
+seurat_obj <- seurat_obj[,seurat_obj$annotation %in%keep]
+
+
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = "fraction",
+  fraction = 0.01,
+  group.by = 'annotation',
+  wgcna_name = "test"
+)
+length(GetWGCNAGenes(seurat_obj))
+
+# construct metacells:
+seurat_obj <- MetacellsByGroups(
+  seurat_obj = seurat_obj,
+  group.by = c("annotation"),
+  k = 30,
+  max_shared=20,
+  min_cells=50,
+  reduction = 'pca',
+  ident.group = 'annotation',
+  assay = 'iso',
+  mode = 'sum'
+)
+
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+# setup expression matrix
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group.by='annotation',
+  group_name = unique(seurat_obj$annotation),
+  use_metacells=TRUE
+)
+
+seurat_obj <- TestSoftPowers(seurat_obj)
+
+# plot the results:
+plot_list <- PlotSoftPowers(seurat_obj)
+
+# assemble with patchwork
+pdf(paste0(fig_dir, 'RGL_softpower.pdf'), width=12, height=9)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+# construct wgcna network:
+seurat_obj <- ConstructNetwork(
+  seurat_obj,
+  soft_power=5,
+  setDatExpr=FALSE,
+  detectCutHeight=0.995,
+  mergeCutHeight=0.5
+)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "RGL_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_obj, main='RGL hdWGCNA Dendrogram')
+dev.off()
+
+# compute MEs and module connectivity:
+seurat_obj <- ModuleEigengenes(seurat_obj,)
+seurat_obj <- ModuleConnectivity(seurat_obj)
+
+
+################################################################################
+# reset module names and colors
+################################################################################
+
+# run RenameModules
+seurat_obj <- ResetModuleNames(
+  seurat_obj,
+  new_name = "RGL-M"
+)
+print(names(GetModules(seurat_obj)))
+
+
+library(MetBrewer)
+new_colors <- paste0(met.brewer("Renoir", n=11, type='discrete'))
+new_colors <- sample(new_colors, 11 )
+seurat_obj <- ResetModuleColors(seurat_obj, new_colors)
+
+
+
+################################################################################
+# ME feature plots
+################################################################################
+
+plot_list <- ModuleFeaturePlot(
+  seurat_obj,
+  order=TRUE,
+  raster=TRUE,
+  raster_dpi=400, alpha=1, restrict_range=TRUE
+)
+
+pdf("figures/RGL_featureplot_MEs.pdf",height=10, width=15)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+################################################################################
+# Network visualization
+################################################################################
+
+seurat_obj <- RunModuleUMAP(
+  seurat_obj,
+  n_hubs =5,
+  n_neighbors=10,
+  min_dist=0.5,
+  spread=1,
+  supervised=TRUE,
+  target_weight=0.3
+)
+
+# get the hub gene UMAP table from the seurat object
+umap_df <- GetModuleUMAP(
+  seurat_obj
+)
+
+# plot with ggplot
+p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(
+   color=umap_df$color,
+   size=umap_df$kME*2
+  ) +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'RGL_hubgene_umap_ggplot.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+
+library(reshape2)
+library(igraph)
+pdf(paste0(fig_dir, 'test_hubgene_umap_igraph2.pdf'), width=10, height=10)
+ModuleUMAPPlot(
+  seurat_obj,
+  edge.alpha=0.5,
+  sample_edges=TRUE,
+  keep_grey_edges=FALSE,
+  edge_prop=0.075, # taking the top 20% strongest edges in each module
+  #label_genes = label_genes,
+  label_hubs=3 # how many hub genes to plot per module?
+)
+dev.off()
+
+
+
+
+  # plot with ggplot
+  plot_df <- umap_df
+
+  # compute coordinates for cluster labels
+  centroid_df <- data.frame()
+  for(cur_cluster in unique(plot_df[['module']])){
+    cur_meta <- plot_df[plot_df[['module']] == cur_cluster,]
+    df <- data.frame(
+      cluster = cur_cluster,
+      UMAP1 = mean(cur_meta$UMAP1),
+      UMAP2 = mean(cur_meta$UMAP2)
+    )
+    centroid_df <- rbind(centroid_df, df)
+  }
+
+
+  # plot with ggplot
+  p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
+    ggrastr::rasterise(geom_point(
+     color=umap_df$color,
+     size=umap_df$kME*2
+   ), dpi=500, scale=0.5) +
+    umap_theme() +
+    theme(
+      plot.margin = margin(0,0,0,0),
+      plot.title = element_text(hjust=0.5)
+    ) +
+    ggrepel::geom_text_repel(data = centroid_df, label=centroid_df$cluster, color='black', max.overlaps=Inf, size=3)
+
+
+pdf(paste0(fig_dir, 'RGL_hubgene_umap_ggplot.pdf'), width=10, height=10)
+p
+dev.off()
+
+
+
+# individual module networks
+ModuleNetworkPlot(
+  seurat_obj,
+  mods = "all",
+  #label_center=TRUE,
+  outdir = paste0(fig_dir, 'RGL_hubNetworks/')
+)
+
+
+
+
+```
+
+
+Save the results
+```{r eval=FALSE}
+
+saveRDS(seurat_obj, paste0(data_dir, 'sciso_RGL_hdWGCNA.rds'))
+
+```
+
+Run enrichr
+
+```{r eval=FALSE}
+
+library(enrichR)
+
+dbs <-c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021', 'WikiPathway_2021_Mouse', 'KEGG_2021_Mouse')
+
+modules <- GetModules(seurat_obj); modules_full <- modules
+modules <- dplyr::rename(modules, c(isoform_name = gene_name))
+modules$gene_name <- sub("-[^-]+$", "", modules$isoform_name)
+seurat_obj <- SetModules(seurat_obj, modules)
+
+# compute GO terms:
+seurat_obj <- RunEnrichr(seurat_obj, dbs=dbs)
+seurat_obj <- SetModules(seurat_obj, modules_full)
+
+
+enrichr_df <- GetEnrichrTable(seurat_obj) %>% subset(P.value < 0.05)
+write.table(enrichr_df, quote=FALSE, sep='\t', row.names=FALSE, file=paste0(data_dir, 'RGL_enrichr.tsv'))
+
+################################################################################
+# Plot selected GO terms
+################################################################################
+
+modules <- GetModules(seurat_obj)
+color_df <- modules %>% subset(module!='grey') %>%
+  select(c(module, color)) %>% distinct %>%
+  rename(c(group=module, colour=color))
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+
+# helper function to wrap text
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+combined_output <- GetEnrichrTable(seurat_obj)
+selected_terms <- read.table('data/RGL_enrichr_selected.txt', sep='\t', header=1)
+
+# subset selected terms
+selected_terms <- subset(combined_output, Term %in% selected_terms$Term & P.value < 0.05)
+
+selected_terms$group <- factor(
+  as.character(selected_terms$module),
+  levels = mods
+)
+
+# set max pval
+quantile(-log(selected_terms$P.value), 0.95)
+max_p <- 10
+
+selected_terms$logp <- -log(selected_terms$P.value)
+selected_terms$logp <- ifelse(selected_terms$logp > max_p, max_p, selected_terms$logp)
+
+# remove GO Term ID
+selected_terms$Term <- str_replace(selected_terms$Term, " \\s*\\([^\\)]+\\)", "")
+
+selected_terms <- selected_terms %>%
+  arrange(group)
+
+
+selected_terms$wrap <- wrapText(selected_terms$Term, 35)
+
+selected_terms$Term <- factor(
+  as.character(selected_terms$Term),
+  levels = rev(unique(as.character(selected_terms$Term)))
+)
+
+# GO Term dot plot
+p <- selected_terms %>%
+  ggplot(aes(x = group, y = Term, color =logp, size=log(Combined.Score))) +
+  geom_point() +
+  scale_color_stepsn(colors=rev(magma(256))) +
+  RotatedAxis() + xlab('') + ylab('') +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.border = element_rect(size=1, color='black', fill=NA),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.margin = margin(0,0,0,0),
+    panel.grid = element_line(size=0.25, color='lightgrey')
+  )
+
+
+# make the colorbar as its own heatmap
+color_df$var <- 1
+colorbar <- color_df %>%
+  ggplot(aes(x=group, y=var, fill=group)) +
+  geom_tile() +
+  scale_fill_manual(values=color_df$colour) +
+  coord_equal() +
+  NoLegend() + RotatedAxis() +
+  theme(
+    plot.title=element_blank(),
+    axis.line=element_blank(),
+    axis.ticks.y =element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_blank(),
+    plot.margin=margin(0,0,0,0),
+  )
+
+pdf(paste0(fig_dir, 'selected_GO_terms.pdf'), width=9, height=8)
+p / colorbar #+ plot_layout(heights=c(20,1))
+dev.off()
+
+```
+
+Identify genes with isoforms in more than one module
+
+```{r eval=FALSE}
+
+modules <- GetModules(seurat_obj)
+color_df <- modules %>% subset(module!='grey') %>%
+  select(c(module, color)) %>% distinct %>%
+  rename(c(group=module, colour=color))
+cp <- color_df$colour; names(cp) <- color_df$group
+
+modules <- dplyr::rename(modules, c(isoform_name = gene_name))
+modules$gene_name <- sub("-[^-]+$", "", modules$isoform_name)
+modules <- subset(modules, module != 'grey')
+
+write.csv(modules, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'RGL_isoseq_modules.csv'))
+
+mod_iso <- table(modules$gene_name, modules$module)
+mod_iso[mod_iso > 1] <- 1
+
+multimod_genes <- names(which(Matrix::rowSums(mod_iso) > 1))
+
+multimod_df <- subset(modules, gene_name %in% multimod_genes)
+
+subset(multimod_df, gene_name == 'Gfap')
+
+# write it to a file:
+multimod_df %>% dplyr::select(c(isoform_name, gene_name, module, color)) %>%
+  write.csv(file=paste0(data_dir, 'multimod_genes.csv'), quote=FALSE, row.names=FALSE)
+
+
+################################################################################
+# how many genes have 1 isoform, all isoforms in the same module, isoforms split
+# across modules?
+################################################################################
+
+# total number of genes:
+n_genes <- modules$gene_name %>% unique %>% length
+
+# number of genes with one isoform:
+one_iso <- names(which(table(modules$gene_name) == 1))
+
+n_one <- length(one_iso)
+n_multi_split <- length(multimod_genes)
+n_multi_same <- n_genes - n_one - n_multi_split
+
+data <- data.frame(
+  category = c('one isoform', 'multi iso, same module', 'mutli iso, diff modules'),
+  count = c(n_one, n_multi_same, n_multi_split)
+)
+
+# Compute percentages
+data$fraction <- data$count / sum(data$count)
+
+# Compute the cumulative percentages (top of each rectangle)
+data$ymax <- cumsum(data$fraction)
+
+# Compute the bottom of each rectangle
+data$ymin <- c(0, head(data$ymax, n=-1))
+
+# Compute label position
+data$labelPosition <- (data$ymax + data$ymin) / 2
+
+# percentage:
+data$percent <- paste0(signif(data$fraction * 100, 3), "%")
+
+# Compute a good label
+data$label <- paste0(data$category, "\n", data$percent)
+
+# Make the plot
+p <- ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=category)) +
+  geom_rect() +
+  geom_text( x=2, aes(y=labelPosition, label=label), size=5, color='black') +
+  scale_fill_brewer(palette=4) +
+  coord_polar(theta="y") +
+  xlim(c(0, 4)) +
+  theme_void() +
+  theme(legend.position = "none")
+
+
+pdf(paste0(fig_dir, 'RGL_donut_multimod.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+################################################################################
+# network vis with selected genes
+################################################################################
+
+hubs <- GetHubGenes(seurat_obj, 25)
+
+# which genes are hub genes in more than one module?
+hubs <- dplyr::rename(hubs, c(isoform_name = gene_name))
+hubs$gene_name <- sub("-[^-]+$", "", hubs$isoform_name)
+hubs <- hubs %>% dplyr::select(c(gene_name, module)) %>% distinct()
+multimod_hubs <- names(which(table(hubs$gene_name) > 1))
+multimod_hubs
+
+plot_genes <- c(
+  'Gfap-0', 'Gfap-1', 'Gfap-2', 'Gfap-3', 'Gfap-5',
+  'Cd9-0', 'Cd9-1',
+  'Cd81-0', 'Cd81-1',
+  'Fabp5-0', 'Fabp5-1',
+  'H3f3b-0', 'H3f3b-1'
+)
+
+library(igraph)
+pdf(paste0(fig_dir, 'RGL_coex_umap_multimod_igraph2.pdf'), width=7, height=7)
+ModuleUMAPPlot(
+  seurat_obj,
+  edge.alpha=0.5,
+  sample_edges=TRUE,
+  keep_grey_edges=FALSE,
+  edge_prop=0.075, # taking the top 20% strongest edges in each module
+#   label_genes = umap_df$isoform_name[umap_df$gene_name %in% plot_genes],
+  label_genes = plot_genes,
+  label_hubs=2 # how many hub genes to plot per module?
+)
+dev.off()
+
+
+
+```
+
+Run UMAP on RGL alone
+
+```{r eval=FALSE}
+
+library(MetBrewer)
+new_colors <- paste0(met.brewer("Lakota", n=4, type='discrete'))
+color_df <- data.frame(
+  group = unique(seurat_obj$annotation),
+  colour = new_colors
+)
+cp <- color_df$colour; names(cp) <- color_df$group
+
+DefaultAssay(seurat_obj) <- 'RNA'
+seurat_obj <- RunUMAP(seurat_obj, dims=1:15, min.dist=0.2, n.neighbors=15L, spread=0.5)
+
+p <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'annotation',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 600,
+  point_size=1,
+  raster_scale=0.75,
+  plot_under=TRUE,
+  plot_theme = umap_theme(),
+  color_df = color_df
+)
+
+
+pdf(paste0(fig_dir, 'RGL_umap.pdf'), width=5, height=5)
+p
+dev.off()
+
+# umap of full dataset
+p <- PlotEmbedding(
+  seurat_full,
+  group.by = 'annotation',
+  label=TRUE,
+  raster=TRUE,
+  raster_dpi = 600,
+  point_size=1,
+  raster_scale=0.5,
+  plot_under=TRUE,
+  plot_theme = umap_theme(),
+  color_df = color_df,
+  selected = c('RGL', 'ASC', 'Ependymal', 'NIPCs')
+)
+
+pdf(paste0(fig_dir, 'RGL_umap_full.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+```
+
+Pseudotime trajectory analysis with monocle3
+
+```{r eval=FALSE}
+
+library(monocle3)
+library(SeuratWrappers)
+
+# process the CDS
+rgl_cds <- as.cell_data_set(seurat_obj)
+rgl_cds <- cluster_cells(cds=rgl_cds, reduction_method='UMAP')
+
+
+p <- plot_cells(
+  cds = rgl_cds,
+  color_cells_by = "partition",
+  show_trajectory_graph = FALSE
+)
+
+pdf(paste0(fig_dir, 'rgl_umap_monocle.pdf'),  width=7, height=5, useDingbats=FALSE)
+p
+dev.off()
+
+# learn graph for pseudotime
+rgl_cds <- learn_graph(
+  rgl_cds,
+  use_partition=FALSE,
+  learn_graph_control=list(prune_graph=FALSE)
+)
+
+p <- plot_cells(
+  cds = rgl_cds,
+  color_cells_by = "annotation",
+  show_trajectory_graph = TRUE,
+  label_principal_points = TRUE
+) + umap_theme()
+
+pdf(paste0(fig_dir, 'rgl_principal_points.pdf'),  width=5, height=5, useDingbats=FALSE)
+p
+dev.off()
+
+# get principal node & order cells based on where the radial glia are as the start
+principal_node <- 'Y_7'
+rgl_cds <- order_cells(rgl_cds,root_pr_nodes = principal_node)
+
+# add pseudotime to seurat object:
+seurat_obj$pseudotime <- pseudotime(rgl_cds)
+seurat_obj$asc_pseudotime <- ifelse(seurat_obj$annotation %in% c("RGL", "ASC"), seurat_obj$pseudotime, NA)
+seurat_obj$epd_pseudotime <- ifelse(seurat_obj$annotation %in% c("RGL", "Ependymal"), seurat_obj$pseudotime, NA)
+seurat_obj$nipc_pseudotime <- ifelse(seurat_obj$annotation %in% c("RGL", "NIPCs"), seurat_obj$pseudotime, NA)
+
+p <- plot_cells(
+  cds = rgl_cds,
+  color_cells_by = "pseudotime",
+  show_trajectory_graph = TRUE,
+  label_roots = TRUE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE,
+) + umap_theme()
+
+pdf(paste0(fig_dir, 'umap_pseudotime.pdf'),  width=5, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+p1 <- FeaturePlot(seurat_obj, feature='asc_pseudotime', raster=FALSE) + umap_theme() + scale_color_gradientn(colors=plasma(256)) + coord_equal()
+pdf(paste0(fig_dir, 'test_umap_pseudotime.pdf'),  width=4, height=4, useDingbats=FALSE)
+p1
+dev.off()
+
+
+saveRDS(seurat_obj, paste0(data_dir, 'sniso_RGL_hdWGCNA.rds'))
+
+```
+
+Plot pseudotime trajectories
+
+```{r eval=FALSE}
+
+library(MetBrewer)
+new_colors <- paste0(met.brewer("Lakota", n=4, type='discrete'))
+color_df <- data.frame(
+  group = unique(seurat_obj$annotation),
+  colour = new_colors
+)
+cp <- color_df$colour; names(cp) <- color_df$group
+
+seurat_obj$UMAP1 <- seurat_obj@reductions$umap@cell.embeddings[,1]
+seurat_obj$UMAP2 <- seurat_obj@reductions$umap@cell.embeddings[,2]
+
+# Ependymal
+p1 <- seurat_obj@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=epd_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=plasma(256), na.value='grey') +
+  umap_theme()
+
+# ASC
+p2 <- seurat_obj@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=asc_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=viridis(256), na.value='grey') +
+  umap_theme()
+
+# NPCs
+p3 <- seurat_obj@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=nipc_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=inferno(256), na.value='grey') +
+  umap_theme()
+
+pdf(paste0(fig_dir, 'RGL_umap_pseudotime.pdf'),  width=8, height=8, useDingbats=FALSE)
+p1 + p2 + p3 + plot_layout(ncol=2, guides='collect')
+dev.off()
+
+```
+
+Module Trajectories
+
+```{r eval=FALSE}
+
+# cut pseudotime into bins using galilean:
+seurat_obj <- BinPseudotime(seurat_obj, pseudotime_col='nipc_pseudotime', n_bins=c(10, 20))
+seurat_obj <- BinPseudotime(seurat_obj, pseudotime_col='asc_pseudotime', n_bins=c(10, 20))
+seurat_obj <- BinPseudotime(seurat_obj, pseudotime_col='epd_pseudotime', n_bins=c(10, 20))
+
+MEs <- GetMEs(seurat_obj)
+modules <- GetModules(seurat_obj)
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+module_colors <- modules %>% dplyr::select(c(module, color)) %>% distinct()
+rownames(module_colors) <- module_colors$module
+mod_colors <- module_colors[mods, 'color']
+
+seurat_obj@meta.data <- cbind(seurat_obj@meta.data, MEs)
+
+
+################################################################
+# EPD pseudotime
+################################################################
+
+# compute the average ME score in each bin:
+features <- mods
+
+avg_scores <- seurat_obj@meta.data %>%
+  group_by(epd_pseudotime_bins_20) %>%
+  select(all_of(features)) %>%
+  summarise_all(mean)
+
+colnames(avg_scores)[1] <- 'bin'
+
+plot_df <- reshape2::melt(avg_scores)
+epd_df <- plot_df
+
+p1 <- ggplot(plot_df, aes(x = as.numeric(bin), y = value, color=variable)) +
+  geom_point() +
+  geom_smooth() +
+  scale_color_manual(values=mod_colors)+
+  xlab('Pseudotime') +
+  ylab('ME') +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  ) +
+  NoLegend()
+
+pdf(paste0(fig_dir, 'EPD_pseudotime_MEs.pdf'), width=10, height=6)
+
+p1 + facet_wrap(~variable, ncol=4, scales='free')
+
+dev.off()
+
+
+################################################################
+# ASC pseudotime
+################################################################
+
+# compute the average ME score in each bin:
+features <- mods
+
+avg_scores <- seurat_obj@meta.data %>%
+  group_by(asc_pseudotime_bins_20) %>%
+  select(all_of(features)) %>%
+  summarise_all(mean)
+
+colnames(avg_scores)[1] <- 'bin'
+
+plot_df <- reshape2::melt(avg_scores)
+asc_df <- plot_df
+
+p1 <- ggplot(plot_df, aes(x = as.numeric(bin), y = value, color=variable)) +
+  geom_point() +
+  geom_smooth() +
+  scale_color_manual(values=mod_colors)+
+  xlab('Pseudotime') +
+  ylab('ME') +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  ) +
+  NoLegend()
+
+pdf(paste0(fig_dir, 'ASC_pseudotime_MEs.pdf'), width=10, height=6)
+p1 + facet_wrap(~variable, ncol=4, scales='free')
+dev.off()
+
+################################################################
+# NPC pseudotime
+################################################################
+
+# compute the average ME score in each bin:
+features <- mods
+
+avg_scores <- seurat_obj@meta.data %>%
+  group_by(nipc_pseudotime_bins_20) %>%
+  select(all_of(features)) %>%
+  summarise_all(mean)
+
+colnames(avg_scores)[1] <- 'bin'
+
+plot_df <- reshape2::melt(avg_scores)
+nipc_df <- plot_df
+
+p1 <- ggplot(plot_df, aes(x = as.numeric(bin), y = value, color=variable)) +
+  geom_point() +
+  geom_smooth() +
+  scale_color_manual(values=mod_colors)+
+  xlab('Pseudotime') +
+  ylab('ME') +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  ) +
+  NoLegend()
+
+pdf(paste0(fig_dir, 'NIPCs_pseudotime_MEs.pdf'), width=10, height=6)
+p1 + facet_wrap(~variable, ncol=4, scales='free')
+dev.off()
+
+
+################################################################
+# Plot trajectories for all modules with all 3 groups:
+################################################################
+
+asc_df$bin <- as.numeric(asc_df$bin); asc_df$group <- 'ASC'
+epd_df$bin <- as.numeric(epd_df$bin); epd_df$group <- 'Ependymal'
+nipc_df$bin <- as.numeric(nipc_df$bin); nipc_df$group <- 'NIPCs'
+
+plot_df <- do.call(rbind, list(asc_df, epd_df, nipc_df))
+
+p1 <- plot_df %>%
+  ggplot(aes(x = as.numeric(bin), y = value, color=group)) +
+  geom_smooth(se=FALSE) +
+  geom_hline(yintercept=0, linetype='dashed', color='grey') +
+  scale_color_manual(values=cp[unique(plot_df$group)])+
+  xlab('Pseudotime') +
+  ylab('ME') +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  )
+
+pdf(paste0(fig_dir, 'RGL_pseudotime_MEs.pdf'), width=6, height=5)
+p1 + facet_wrap(~variable, ncol=3, scales='free')
+dev.off()
+
+
+
+```
+
+save data for Swan
+
+```{r eval=FALSE}
+
+X <- GetAssayData(seurat_full, slot='counts', assay='iso')
+df <- as.data.frame(X)
+
+zz <- gzfile("/pub/smorabit/hdWGCNA/isoseq/data/dataSharing_countsPerCell/isoformByCellMatrix/features.tsv.gz", 'rt')
+feats <- read.table(zz)
+
+rownames(df) <- feats$V1
+bcs <- colnames(df)
+df$transcript_id <- feats$V1
+df <- df[,c('transcript_id', bcs)]
+
+write.table(df, quote=FALSE, file=paste0(data_dir, 'sniso_counts.tsv'), sep = '\t', row.names=FALSE)
+write.table(seurat_full@meta.data, quote=FALSE, file=paste0(data_dir, 'sniso_cell_meta.tsv'))
+
+```
+
+one-versus-all Differential module eigengene (DME) analysis
+
+```{r eval=FALSE}
+
+DMEs_all <- FindAllDMEs(
+  seurat_obj,
+  group.by = 'annotation',
+)
+
+write.csv(DMEs_all, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'RGL_DMEs.csv'))
+
+```

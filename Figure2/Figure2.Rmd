@@ -1,11 +1,17 @@
 
+
+Using the Zhou et al hdWGCNA analysis from Figure 1 of the paper, we need to
+evaluate the performance of hdWGCNA
+
 ```{r eval=FALSE}
+
 
 library(Seurat)
 library(tidyverse)
 library(cowplot)
 library(patchwork)
 library(WGCNA)
+
 library(Matrix)
 library(viridis)
 library(harmony)
@@ -22,6 +28,7 @@ library(gridExtra)
 library(igraph)
 library(ggrepel)
 library(hdWGCNA)
+library(magrittr)
 enableWGCNAThreads(nThreads = 8)
 theme_set(theme_cowplot())
 set.seed(12345)
@@ -29,1005 +36,723 @@ set.seed(12345)
 
 # spatial plotting functions
 source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
-source("/pub/smorabit/hdWGCNA/bin/spatial_functions.R")
-source('~/swaruplab/smorabit/analysis/scWGCNA/bin/metaspots.R')
+
+#devtools::install_github('smorabit/hdWGCNA', ref='dev')
+#library(hdWGCNA)
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/')
 
 # output directories
 data_dir <- "data/"
 fig_dir <- 'figures/'
 
-```
+# re-load scWGCNA dataset:
+load(file='data/Zhou_color_scheme.rda')
 
-Set up the 10X Genomics anterior / posterior mouse brain dataset:
 
-```{r eval=FALSE}
+# reload process ed with all cell types
+# seurat_obj <-  readRDS(file=paste0(data_dir, 'Zhou_scWGCNA_all_celltypes.rds'))
 
-library(Seurat)
-library(SeuratData)
-library(tidyverse)
-library(magrittr)
 
-brain <- LoadData("stxBrain", type = "anterior1")
-brain2 <- LoadData("stxBrain", type = "posterior1")
-seurat_obj <- merge(brain, brain2)
+load('/dfs7/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/celltype-analysis/data/color_scheme.rda')
+cp <- unlist(color_scheme_snRNA_celltype)
+cp[names(cp) == 'EX'] <- 'turquoise'
 
-# add image data:
-image_df <- do.call(rbind, lapply(names(seurat_obj@images), function(x){
-  seurat_obj@images[[x]]@coordinates
-}))
 
-tmp <- merge(seurat_obj@meta.data, image_df, by='row.names')
-rownames(tmp) <- tmp$Row.names
-ix <- match(as.character(colnames(seurat_obj)), as.character(rownames(tmp)))
-tmp <- tmp[ix,]
-all.equal(as.character(rownames(tmp)), as.character(colnames(seurat_obj)))
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/evaluate')
 
-seurat_obj@meta.data <- tmp
+seurat_obj <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/scWGCNA/brain_iterative/data/Zhou_scWGCNA_all_celltypes.rds')
 
-# jointly process
-seurat_obj %<>% NormalizeData() %>%
-  FindVariableFeatures() %>%
-  ScaleData() %>%
-  RunPCA()
-seurat_obj <- FindNeighbors(seurat_obj, dims = 1:30)
-seurat_obj <- FindClusters(seurat_obj,verbose = TRUE)
-
-saveRDS(seurat_obj, file='10x_mouse_brain_processed.rds')
 
 ```
 
-Run hdWGCNA in the mouse dataset
+Run EGAD tutorial
+
+https://github.com/sarbal/EGAD
 
 ```{r eval=FALSE}
 
-# add the cluster annotations
-annotations <- read.csv('~/swaruplab/smorabit/analysis/scWGCNA/data/10x_mouse_brain_annotations.csv')
-ix <- match(seurat_mouse_vis$seurat_clusters, annotations$seurat_clusters)
-seurat_mouse_vis$annotation <- annotations$annotation[ix]
+# Load EGAD and the data files
+library(EGAD)
+data(biogrid)
+data(GO.human)
 
+# Or you can load EGADlite here too (https://github.com/sarbal/EGADLite):
+# load("EGADlite.RData")
+# download the data folder into your directory and run
+# load("data/biogrid.RData")
+# load("data/GO.human.RData")
 
-patch <- VisDimPlot(
-  seurat_mouse_vis,
-  group.by = 'annotation',
-  sample_col = 'region',
-  dpi=600,
-  ncol = 2,
-  text_size=15
-)
+# Make your gene list and the network
+genelist <- make_genelist(biogrid)
+gene_network <- make_gene_network(biogrid,genelist)
 
-pdf(paste0(fig_dir, 'mouse_hex_ananotation.pdf'), width=12, height=4)
-patch
-dev.off()
+# Store your annotation matrix
+goterms <- unique(GO.human[,3])
+annotations <- make_annotations(GO.human[,c(2,3)],genelist,goterms)
 
+# Run GBA
+GO_groups_voted <- run_GBA(gene_network, annotations)
 
-seurat_mouse_vis <- SetupForWGCNA(
-  seurat_mouse_vis,
-  gene_select = "fraction",
-  fraction = 0.05,
-  wgcna_name = "vis"
-)
-length(GetWGCNAGenes(seurat_mouse_vis))
+# neighbor voting AUROCs
+auc_GO_nv = GO_groups_voted[[1]][,1]
+median(auc_GO_nv)
 
-# construct metaspots
-seurat_mouse_vis$region <- factor(as.character(seurat_mouse_vis$region), levels=c('anterior', 'posterior'))
-seurat_mouse_vis <- MetaspotsByGroups(
-  seurat_mouse_vis,
-  group.by = c("region"),
-  mode = 'sum'
-)
-seurat_mouse_vis  <- NormalizeMetacells(seurat_mouse_vis )
+# node degree AUCs
+auc_GO_nd = GO_groups_voted[[1]][,3]
+median(auc_GO_nd)
 
-seurat_mouse_vis  <- SetDatExpr(
-  seurat_mouse_vis ,
-  group.by=NULL,
-  group_name = NULL
-)
+length(goterms)
+length(genelist)
 
-seurat_mouse_vis <- TestSoftPowers(seurat_mouse_vis)
+dim(annotations)
 
-# plot the results:
-plot_list <- PlotSoftPowers(seurat_mouse_vis)
+# all the genes and only some of the GO terms
+dim(GO_groups_voted[[2]])
 
-# assemble with patchwork
-pdf(paste0(fig_dir, 'mouse_vis_softpower.pdf'), width=12, height=8)
-wrap_plots(plot_list, ncol=2)
-dev.off()
-
-# construct wgcna network:
-seurat_mouse_vis <- ConstructNetwork(
-  seurat_mouse_vis, tom_name='mouse_vis', overwrite_tom=TRUE
-)
-
-# plot the dendrogram
-pdf(paste0(fig_dir, "mouse_vis_dendro_test.pdf"),height=3, width=6)
-PlotDendrogram(seurat_mouse_vis, main='hdWGCNA Dendrogram')
-dev.off()
-
-seurat_mouse_vis <- ModuleEigengenes(seurat_mouse_vis, exclude_grey=FALSE)
-seurat_mouse_vis <- ModuleConnectivity(seurat_mouse_vis, harmonized=FALSE)
-
-# rename modules
-seurat_mouse_vis <- ResetModuleNames(
-  seurat_mouse_vis,
-  new_name = "SM"
+df <- data.frame(
+  nv_auc = auc_GO_nv,
+  nd_auc = auc_GO_nd
 )
 
 
-################################################################################
-# change module colors
-################################################################################
 
-library(MetBrewer)
-
-modules <- GetModules(seurat_mouse_vis)
-mods <- levels(modules$module)
-mod_colors <- dplyr::select(modules, c(module, color)) %>%
-  distinct %>% arrange(module) %>% .$color
-n_colors <- length(mod_colors) -1
-
-modules$module <- ifelse(
-  is.na(as.character(modules$module)), 'grey',
-  as.character(modules$module)
-)
-modules$module <- as.factor(modules$module)
-modules[is.na(modules$module),'module'] <- 'grey'
-seurat_mouse_vis <- SetModules(seurat_mouse_vis, modules)
-
-new_colors <- paste0(met.brewer("Redon", n=n_colors, type='discrete'))
-seurat_mouse_vis <- ResetModuleColors(seurat_mouse_vis, new_colors)
-
-
-################################################################################
-# plot the module eigengenes
-################################################################################
-
-MEs <- GetMEs(seurat_mouse_vis)
-modules <- GetModules(seurat_mouse_vis)
-mods <- levels(modules$module)
-mods <- mods[mods!='grey']
-MEs <- MEs[,mods]
-
-seurat_mouse_vis@meta.data <- cbind(seurat_mouse_vis@meta.data, MEs)
-
-plot_list <- list()
-for(cur_mod in mods){
-  print(cur_mod)
-  p <- SampleFeaturePlot(
-    seurat_mouse_vis,
-    feature=cur_mod,
-    sample_col = "region",
-    ncol = 2,
-    raster=TRUE,
-    plot_max = 'q99',
-    plot_min = 0,
-    colfunc = inferno,
-    rev_colors=TRUE,
-    dpi=600,
+p1 <- ggplot(df, aes(y = nv_auc, x=1)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
+  ggtitle('Neighbor voting') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    panel.border =element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
   )
-  plot_list[[cur_mod]] <- p
 
-}
 
-pdf(paste0(fig_dir, 'mouse_ME_spatial_featureplots/combined_featureplot.pdf'), width=10, height=12)
-wrap_plots(plot_list, ncol=2)
+pdf(paste0(fig_dir, 'test_dens_example.pdf'), width=2, height=3)
+p1
 dev.off()
 
-################################################################################
-# Hubgene circle plots:
-################################################################################
 
-library(igraph)
+```
 
-# individual module networks
-ModuleNetworkPlot(
-  seurat_mouse_vis,
-  mods = "all",
-  outdir = paste0(fig_dir, 'mouse_vis_hubNetworks/')
-)
+Run EGAD on our data
+loop over each cell type
 
-################################################################################
-# UMAP:
-################################################################################
+```{r eval=FALSE}
+
+library(EGAD)
+
+groups <- c('ASC', 'EX', 'INH', 'MG', 'OPC', 'ODC')
+
+ensembl <- read.delim('/dfs7/swaruplab/smorabit/resources/ensembl_GO.txt', sep='\t', header=1)
+
+# load the genes file
+gene_table <- read.table('/dfs7/swaruplab/shared_lab/cross-disorder/count_matrices/AD_Zhou_2020/C1/counts_unfiltered/genes.tsv')
+gene_table$ID <- do.call(rbind, strsplit(gene_table$V1, '[.]'))[,1]
 
 
-seurat_mouse_vis <- RunModuleUMAP(
-  seurat_mouse_vis,
-  n_hubs = 5,
-  n_neighbors=15,
-  min_dist=0.3,
-  spread=1
-)
+plot_df <- data.frame()
+auc_df <- data.frame()
+for(cur_group in groups){
 
-# get the hub gene UMAP table from the seurat object
-umap_df <- GetModuleUMAP(
-  seurat_mouse_vis
-)
+  print(cur_group)
 
-# plot with ggplot
-p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
-  geom_point(
-   color=umap_df$color,
-   size=umap_df$kME*2
-  ) +
-  umap_theme()
+  # get network info for this group
+  TOM <- GetTOM(seurat_obj, cur_group)
+  modules <- GetModules(seurat_obj, cur_group)
 
-pdf(paste0(fig_dir, 'mouse_vis_hubgene_umap_ggplot_uns.pdf'), width=5, height=5)
-p
-dev.off()
+  # get a list of unique genes
+  genelist <- unique(modules$gene_name)
+  genelist <- genelist[(genelist %in% gene_table$V2)]
 
-# get the hub gene UMAP table from the seurat object
-umap_df <- GetModuleUMAP(seurat_mouse_vis)
+  # subset TOM to just these genes
+  TOM <- TOM[genelist,genelist]
 
-# plot with ggplot
-plot_df <- umap_df
+  # get IDs for these genes
+  ix <- match(genelist, gene_table$V2)
+  gene_ids <- gene_table$ID[ix]
 
-# compute coordinates for cluster labels
-centroid_df <- data.frame()
-for(cur_cluster in unique(plot_df[['module']])){
-  cur_meta <- plot_df[plot_df[['module']] == cur_cluster,]
+  # rename TOM genes to gene ids
+  colnames(TOM) <- gene_ids
+  rownames(TOM) <- gene_ids
+
+  # set up annotations
+  goterms <- unique(ensembl$GO.term.accession)
+  go_table <- ensembl[,c(1,4)] %>% subset(GO.term.accession != '')
+  annotations <- make_annotations(go_table, gene_ids, goterms)
+
+  print(dim(annotations))
+  length(gene_ids)
+  length(goterms)
+
+  # Run GBA
+  GO_groups_voted <- run_GBA(TOM, annotations, min=10, max=Inf)
+
+  # neighbor voting AUROCs
+  auc_GO_nv = GO_groups_voted[[1]][,1]
+
+  dim(GO_groups_voted[[2]])
+
+  # node degree AUCs
+  auc_GO_nd = GO_groups_voted[[1]][,3]
+
+  # multifunctionality
+  multifunc_assessment <- calculate_multifunc(annotations)
+  auc_mf <- auc_multifunc(annotations, multifunc_assessment[,4])
   df <- data.frame(
-    cluster = cur_cluster,
-    UMAP1 = mean(cur_meta$UMAP1),
-    UMAP2 = mean(cur_meta$UMAP2)
+    auc = auc_mf,
+    annotation = colnames(annotations)
   )
-  centroid_df <- rbind(centroid_df, df)
+  df$celltype <- cur_group
+  auc_df <- rbind(auc_df, df)
+
+  # neighbor voting df
+  df <- data.frame(
+    nv_auc = auc_GO_nv,
+    nd_auc = auc_GO_nd
+  )
+  df$celltype <- cur_group
+  plot_df <- rbind(plot_df, df)
+
 }
 
 
 
-# add annotation
-hub_genes <- GetHubGenes(seurat_mouse_vis, 3)
-anno_genes <- hub_genes$gene_name
-plot_df$anno <- ifelse(plot_df$gene %in% anno_genes, umap_df$gene, '')
+auc_df %<>% subset(!is.nan(auc))
 
-plot_df_anno <- subset(plot_df, anno != '')
-p <-  plot_df %>%
-  ggplot(aes(x=UMAP1, y=UMAP2, color=module)) +
-  ggrastr::rasterise(
-    geom_point(
-      inherit.aes=FALSE,
-      data=plot_df,
-      aes(x=UMAP1, y=UMAP2, color=module),
-      color=plot_df$color,
-      size=plot_df$kME,
-    ), dpi=800, dpi_scale=0.5) +
-  geom_point(
-    inherit.aes = FALSE,
-    data = plot_df_anno,
-    shape=21, color='black',
-    fill=plot_df_anno$color,
-    size=plot_df_anno$kME,
-    aes(x=UMAP1, y=UMAP2, fill=module)
-  ) +
-  # add labels
-  ggrepel::geom_text_repel(data = centroid_df, label=centroid_df$cluster, color='black', max.overlaps=Inf, size=3, fontface='bold') +
-  geom_text_repel(label=plot_df$anno, max.overlaps=Inf, color='black', fontface='italic', size=2) +
-  umap_theme() + NoLegend() +
-  coord_equal() +
-  theme(
-    plot.margin = margin(0,0,0,0)
-  )
+write.csv(plot_df, file='data/egad_auc.csv')
 
-  pdf(paste0(fig_dir, 'mouse_vis_hubgene_umap_ggplot.pdf'), width=5, height=5)
-  print(p)
-  dev.off()
-
-library(reshape2)
-library(igraph)
-pdf(paste0(fig_dir, 'mouse_vis_hubgene_umap_igraph.pdf'), width=10, height=10)
-ModuleUMAPPlot(
-  seurat_mouse_vis,
-  edge.alpha=0.5,
-  sample_edges=TRUE,
-  keep_grey_edges=FALSE,
-  edge_prop=0.075,
-  label_hubs=5
-)
-dev.off()
+auc_df %>% group_by(celltype) %>% summarise(median(auc))
 
 
-################################################################################
-# pathway enrichment analysis
-################################################################################
+t1 <- subset(auc_df, celltype == 'EX')
+t2 <- subset(auc_df, celltype == 'INH')
 
-library(enrichR)
+all.equal(t1$annotation, t2$annotation)
+all.equal(t1$auc, t2$auc)
 
-dbs <-c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021', 'WikiPathway_2021_Mouse', 'KEGG_2021_Mouse')
+plot_df %>% group_by(celltype) %>% summarise(Mean = median(nv_auc))
 
-# compute GO terms:
-seurat_mouse_vis <- RunEnrichr(seurat_mouse_vis, dbs=dbs)
+subset(plot_df, celltype == 'ASC') %>% .$nv_auc %>% quantile
 
-enrichr_df <- GetEnrichrTable(seurat_mouse_vis) %>% subset(P.value < 0.05)
-write.table(enrichr_df, quote=FALSE, sep='\t', row.names=FALSE, file=paste0(data_dir, 'mouse_vis_enrichr.tsv'))
-
-# make GO term plots:
-EnrichrBarPlot(
-  seurat_mouse_vis,
-  outdir = "figures/mouse_vis_enrichr_plots",
-  n_terms = 25, plot_size = c(4,16),
-  logscale=TRUE
-)
-
-# inspect the enrichr table:
-enrichr_df <- GetEnrichrTable(seurat_mouse_vis)
-
-# plot selected go terms:
-modules <- GetModules(seurat_mouse_vis)
-color_df <- modules %>% subset(module!='grey') %>%
-  select(c(module, color)) %>% distinct %>%
-  mutate(module=droplevels(module)) %>%
-  rename(c(group=module, colour=color))
-mods <- levels(modules$module); mods <- mods[mods != 'grey']
-mods <- paste0('SM', 1:12)
-
-color_df$group <- factor(as.character(color_df$group), levels=mods)
-
-# helper function to wrap text
-wrapText <- function(x, len) {
-    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
-}
-
-combined_output <- GetEnrichrTable(seurat_mouse_vis)
-selected_terms <- read.delim('data/mouse_vis_enrichr_selected.txt', sep='\t', header=1)
-
-# subset selected terms
-selected_terms <- subset(combined_output, Term %in% selected_terms$Term & P.value < 0.05)
-
-selected_terms$group <- factor(
-  as.character(selected_terms$module),
-  levels = mods
-)
-
-# set max pval
-quantile(-log(selected_terms$P.value), 0.95)
-max_p <- 10
-
-selected_terms$logp <- -log(selected_terms$P.value)
-selected_terms$logp <- ifelse(selected_terms$logp > max_p, max_p, selected_terms$logp)
-
-# remove GO Term ID
-selected_terms$Term <- str_replace(selected_terms$Term, " \\s*\\([^\\)]+\\)", "")
-
-selected_terms <- selected_terms %>%
-  arrange(group)
+# annotations <- c(rep(0,10))
+# annotations[c(1,3,5)] <- 1
+# optimallist <- 10:1
+# aurocs_mf <- auc_multifunc(annotations, optimallist)
 
 
-selected_terms$wrap <- wrapText(selected_terms$Term, 35)
-selected_terms$Term <- factor(
-  as.character(selected_terms$Term),
-  levels = rev(unique(as.character(selected_terms$Term)))
-)
 
-# GO Term dot plot
-p <- selected_terms %>%
-  ggplot(aes(x = group, y = Term, color =logp, size=log(Combined.Score))) +
-  geom_point() +
-  scale_color_stepsn(colors=rev(magma(256))) +
-  RotatedAxis() + xlab('') + ylab('') +
-  theme(
-    axis.title.x = element_blank(),
-    axis.title.y = element_blank(),
-    panel.border = element_rect(size=1, color='black', fill=NA),
-    axis.line.x = element_blank(),
-    axis.line.y = element_blank(),
-    axis.text.x = element_blank(),
-    axis.ticks.x = element_blank(),
-    plot.margin = margin(0,0,0,0),
-    panel.grid = element_line(size=0.25, color='lightgrey')
-  )
-
-
-# make the colorbar as its own heatmap
-color_df$var <- 1
-cp <- color_df$colour; names(cp) <- color_df$group
-colorbar <- color_df %>%
-  ggplot(aes(x=group, y=var, fill=group)) +
-  geom_tile() +
+p1 <- ggplot(plot_df, aes(y = nv_auc, x=reorder(celltype, nv_auc, median), fill=celltype)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
   scale_fill_manual(values=cp) +
-  coord_equal() +
-  NoLegend() + RotatedAxis() +
-  theme(
-    plot.title=element_blank(),
-    axis.line=element_blank(),
-    axis.ticks.y =element_blank(),
-    axis.text.y = element_blank(),
-    axis.title = element_blank(),
-    plot.margin=margin(0,0,0,0),
-  )
-
-
-pdf(paste0(fig_dir, 'mouse_vis_selected_GO_terms.pdf'), width=8.5, height=8)
-p / colorbar #+ plot_layout(heights=c(20,1))
-dev.off()
-
-
-plot_df <- selected_terms %>% subset(module %in% c('SM4', 'SM6'))
-
-p <- plot_df  %>%
-  ggplot(aes(x=log(Combined.Score), y=reorder(wrap, Combined.Score), fill=module))+
-  geom_bar(stat='identity', position='identity', color='white') +
-  geom_text(aes(label=wrap), x=.1, color='black', size=3.5, hjust='left') +
-  scale_fill_manual(values=cp) +
-  ylab('Term') + xlab('log(Enrichment)') +
-  scale_x_continuous(expand = c(0, 0), limits = c(0, NA)) +
-  theme(
-    panel.grid.major=element_blank(),
-    panel.grid.minor=element_blank(),
-    legend.title = element_blank(),
-    axis.ticks.y=element_blank(),
-    axis.text.y=element_blank(),
-    axis.line.y=element_blank(),
-    plot.title = element_text(hjust = 0.5)
-  )
-
-pdf(paste0(fig_dir, 'mouse_vis_selected_GO_terms_bar.pdf'), width= 3, height=5 , useDingbats=FALSE)
-p + facet_wrap(~module, ncol=1, scales='free') + NoLegend()
-dev.off()
-
-
-
-```
-
-Overlap with the DEGs from Shabestari 2022 with spatial modules
-
-```{r eval=FALSE}
-
-seurat_fire <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_mouse_seurat.rds')
-
-load('~/swaruplab/smorabit/analysis/FIRE_mouse_2021/differential_analysis/data/cluster_marker_DEGs.rda')
-
-table(markers$cluster) %>% dim
-
-markers <- dplyr::rename(markers, avg_log2FC = avg_logFC)
-
-overlap_df <- OverlapModulesDEGs(
-  seurat_mouse_vis,
-  deg_df = markers,
-  fc_cutoff=1
-)
-
-overlap_df$group <- factor(
-  as.character(overlap_df$group), levels=
-  levels(seurat_fire$clusternum_anno)
-)
-
-# plot the results as a heatmap:
-maxval <- 50
-plot_df <- overlap_df
-plot_df$odds_ratio <- ifelse(plot_df$odds_ratio > maxval, maxval, plot_df$odds_ratio)
-plot_df$textcolor <- ifelse(plot_df$odds_ratio > 0.7*maxval, 'white', 'black')
-
-high_color = 'navy'
-p <- plot_df %>%
-  ggplot(aes(y=group, x=module, fill=odds_ratio)) +
-  geom_tile() +
-  geom_text(label=plot_df$Significance, vjust = 0.72, color=plot_df$textcolor) +
-  scale_fill_gradient(low='white', high=high_color) +
   RotatedAxis() +
-  labs(fill = 'Odds ratio') +
+  NoLegend() +
+  ggtitle('Neighbor voting') +
   theme(
-    panel.border = element_rect(fill=NA, color='black', size=1),
-    axis.line.x = element_blank(),
     axis.line.y = element_blank(),
-    axis.title.x = element_blank(),
-    axis.title.y = element_blank(),
-    axis.text.x = element_blank(),
-    axis.ticks.x = element_blank(),
-  #  axis.text.y = element_blank(),
-  #  axis.ticks.y = element_blank(),
-    plot.margin=margin(0,0,0,0)
-  ) +
-  coord_equal()
+    axis.line.x = element_blank(),
+    panel.border =element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
+  )
 
+auc_df$celltype <- factor(
+  as.character(auc_df$celltype),
+  levels = c('ODC', 'EX', 'OPC', 'ASC', 'MG', 'INH')
+)
 
-
-# set up module colors
-m1 <- GetModules(seurat_mouse_vis)
-mods1 <- levels(m1$module); mods1 <- mods1[mods1 != 'grey']
-m1_colors <- m1 %>% subset(module != 'grey') %>%
-  mutate(module = droplevels(module)) %>%
-  dplyr::select(module, color) %>% distinct
-rownames(m1_colors) <- as.character(m1_colors$module)
-m1_colors <- m1_colors[mods1,]
-m1_colors$module <- factor(as.character(m1_colors$module), levels=levels(overlap_df$module))
-#m1_colors$module <- fct_rev(m1_colors$module)
-m1_colors %<>% arrange(module)
-
-m1_colors$var <- 1
-colorbar1 <- m1_colors %>%
-  ggplot(aes(y=var, x=module, fill=module)) +
-  geom_tile() +
-  scale_fill_manual(values=m1_colors$color) +
-  NoLegend() + RotatedAxis() +
+p2 <- ggplot(auc_df, aes(y = auc, x=celltype, fill=celltype)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
+  scale_fill_manual(values=cp) +
+  RotatedAxis() +
+  NoLegend() +
+  ggtitle('Multifunctionality') +
   theme(
-    plot.title=element_blank(),
-    axis.line=element_blank(),
-    axis.ticks.y =element_blank(),
-    axis.text.y = element_blank(),
-    axis.title = element_blank(),
-    axis.ticks = element_blank(),
-    plot.margin=margin(0,0,0,0),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    panel.border = element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
   )
 
 
 
+p3 <- ggplot(plot_df, aes(y = nd_auc, x=reorder(celltype, nd_auc, mean), fill=celltype)) +
+  geom_violin() +
+  geom_boxplot(notch=TRUE, width=0.25, fill='white', outlier.size=0) +
+  ylim(c(0,1)) +
+  xlab('') + ylab('AUC') +
+  scale_fill_manual(values=cp) +
+  RotatedAxis() +
+  NoLegend() +
+  ggtitle('Node degree') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank(),
+    panel.border =element_rect(color='black', fill=NULL, size=1),
+    plot.title = element_text(vjust=-0.5, hjust=0.5, face='plain'),
+    panel.grid.major.y = element_line(color='lightgrey', size=0.5)
+  )
 
-pdf(paste0(fig_dir, 'module_overlap_FIRE_DEGs.pdf'), width=6, height=9)
- p + colorbar1 + plot_layout(heights=c(50,1))
+
+
+# p2 <- ggplot(df, aes(y = nd_auc, x=1)) +
+#   geom_violin() +
+#   ylim(c(0,1)) +
+#   xlab('')
+
+
+
+pdf(paste0(fig_dir, 'test_dens2.pdf'), width=3, height=3)
+p1
+dev.off()
+
+pdf(paste0(fig_dir, 'test_multifunc2.pdf'), width=3, height=3)
+p2
+dev.off()
+
+pdf(paste0(fig_dir, 'test_degree2.pdf'), width=3, height=3)
+p3
 dev.off()
 
 
-
 ```
 
-Differential module eigengene analysis
+Testing code for tracking runtime and memory of different functions
+
+1. MetacellsByGroups
+2. MetaspotsByGroups
+3. ConstructNetwork
+4. ModuleEigengenes
+5. ModuleConnectivity
 
 ```{r eval=FALSE}
 
-DMEs_all <- FindAllDMEs(
-  seurat_mouse_vis,
-  group.by = 'annotation'
+
+seurat_asd <- readRDS(file='/dfs7/swaruplab/smorabit/analysis/scWGCNA/ASD_case_study/data/Velmeshev_2019_hdWGCNA.rds')
+table(seurat_asd$cell_type)
+
+seurat_obj <- seurat_asd %>% subset(cell_type %in% c('INH', 'EX'))
+seurat_obj$cell_group <- 'Neuron'
+
+library(tictoc)
+
+mem_start <- gc()
+
+sample_sizes <- c(1000, 5000, 10000, 15000, 20000, 25000, 30000, 35000, 40000, 45000, 50000)
+
+runtime_df <- data.frame()
+for(n_sample in sample_sizes){
+
+  ################################################################################
+  # Setup the data
+  ################################################################################
+  print(n_sample)
+
+  cells_sample <- sample(colnames(seurat_obj), n_sample)
+  seurat_sample <- seurat_obj[,cells_sample]
+  print(dim(seurat_sample))
+
+  seurat_sample <- SetupForWGCNA(
+    seurat_sample,
+    gene_select = "fraction",
+    fraction = 0.05,
+    wgcna_name = 'test'
+  )
+
+  ################################################################################
+  # MetaceLlsByGroups
+  ################################################################################
+  print('MetacellsByGroups')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- MetacellsByGroups(
+    seurat_sample,
+    group.by = c("cell_group", "Sample"),
+    k = 10,
+    max_shared = 5,
+    reduction = 'harmony',
+    ident.group = 'cell_group',
+    min_cells = 20
+  )
+  mcell_time <- toc()
+  mcell_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+  ################################################################################
+  # SetDatExpr & TestSoftPowers (not timed)
+  ################################################################################
+  print('SetDatExpr')
+
+  seurat_sample <- NormalizeMetacells(seurat_sample)
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- SetDatExpr(
+    seurat_sample,
+    group.by='cell_group',
+    group_name = unique(seurat_sample$cell_group),
+    use_metacells=TRUE,
+    slot = 'data',
+    assay = 'RNA'
+  )
+  sd_time <- toc()
+  sd_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+  print('TestSoftPowers')
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- TestSoftPowers(seurat_sample, setDatExpr = FALSE)
+  tsp_time <- toc()
+  tsp_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+  ################################################################################
+  # ConstructNetwork
+  ################################################################################
+  print('ConstructNetwork')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ConstructNetwork(
+    seurat_sample,
+    setDatExpr=FALSE,
+    tom_name = paste0('test', n_sample),
+    overwrite_tom=TRUE
+  )
+  cn_time <- toc()
+  cn_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+
+  ################################################################################
+  # ModuleEigengenes with harmony
+  ################################################################################
+  print('ModuleEigengenes + harmony')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ModuleEigengenes(
+    seurat_sample,
+    group.by.vars="Sample"
+  )
+  meh_time <- toc()
+  meh_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+  ################################################################################
+  # ModuleEigengenes
+  ################################################################################
+  print('ModuleEigengenes')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ModuleEigengenes(seurat_sample)
+  me_time <- toc()
+  me_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+  ################################################################################
+  # ModuleConnectivity
+  ################################################################################
+  print('ModuleConnectivity')
+
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_sample <- ModuleConnectivity(
+    seurat_sample,
+    group.by='cell_group',
+    group_name = as.character(unique(seurat_sample$cell_group))
+  )
+  mc_time <- toc()
+  mc_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+
+  ################################################################################
+  # Consolidate runtime information
+  ################################################################################
+
+  modules <- GetModules(seurat_sample)
+  n_mods <- length(unique(modules$module))
+
+  run_df <- data.frame(
+    'func' = c('MetacellsByGroups', 'SetDatExpr', 'TestSoftPowers', 'ConstructNetwork', 'ModuleEigengenes', 'ModuleEigengenesHarmony', 'ModuleConnectivity'),
+    'runtime' = c(
+      as.numeric(mcell_time$toc - mcell_time$tic),
+      as.numeric(sd_time$toc - sd_time$tic),
+      as.numeric(tsp_time$toc - tsp_time$tic),
+      as.numeric(cn_time$toc - cn_time$tic),
+      as.numeric(me_time$toc - me_time$tic),
+      as.numeric(meh_time$toc - meh_time$tic),
+      as.numeric(mc_time$toc - mc_time$tic)
+    ),
+    'memory' = c(
+      mcell_mem, sd_mem, tsp_mem, cn_mem, me_mem, meh_mem, mc_mem
+    )
+  )
+  # run_df$memstr <- R.utils::hsize(run_df$memory)
+  run_df$sample <- n_sample
+
+  runtime_df <- rbind(runtime_df, run_df)
+
+  rm(seurat_sample)
+  gc()
+
+}
+
+write.csv(runtime_df, file='data/runtime_summary3.csv')
+
+################################################################################
+# Plot runtime results
+################################################################################
+
+
+rdf2 <- read.csv('data/runtime_summary2.csv')
+rdf3 <- read.csv('data/runtime_summary3.csv')
+
+runtime_df <- rbind(
+  subset(rdf2, func != 'ModuleConnectivity'),
+  subset(rdf3, func %in% c('ModuleConnectivity', 'TestSoftPowers'))
+)
+runtime_df <- runtime_df[,-1]
+
+
+# memory size of object
+# test <- GetMEs(seurat_sample)
+# object.size(GetMEs(seurat_sample)) / 1024 / 1024
+
+# set factor levels for function
+runtime_df$func <- ifelse(
+  as.character(runtime_df$func) == 'ModuleEigengenesHarmony',
+  'ME + Harmony',
+  as.character(runtime_df$func)
 )
 
-write.table(DMEs_all, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 'mouse_vis_DMEs.tsv'), sep='\t')
+# compute totals
+total_df <- runtime_df %>% group_by(sample) %>% summarise(runtime = sum(runtime), memory = sum(memory))
+total_df$memstr <- R.utils::hsize(total_df$memory)
+total_df$func <- 'Total'
+total_df <- total_df[,colnames(runtime_df)]
+runtime_df <- rbind(runtime_df, total_df)
+
+runtime_df$func <- factor(
+  as.character(runtime_df$func),
+  levels = c('MetacellsByGroups', 'SetDatExpr', 'TestSoftPowers', 'ConstructNetwork', 'ModuleEigengenes', 'ME + Harmony', 'ModuleConnectivity', 'Total'),
+)
+
+runtime_df <- subset(runtime_df, !(func %in% c('Total', 'SetDatExpr'))) %>% mutate(func = droplevels(func))
 
 
-```
-
-Compare distributions of pairwise correlations
-
-```{r eval=FALSE}
-library(widyr)
-
-n_genes <- 3000
-genes_use <- rownames(seurat_mouse_vis)
-genes_use <- sample(genes_use, n_genes)
-X <- GetAssayData(seurat_mouse_vis, slot='data')[genes_use,]
-X <- t(X)
-
-# pairwise corr
-out <- qlcMatrix::corSparse(X)
-
-# flatten for plotting
-plot_df <- reshape2::melt(out)
-plot_df <- subset(plot_df, Var1 != Var2)
-plot_df$group <- 'st'
-
-
-# run for metacell
-mobj <- GetMetacellObject(seurat_mouse_vis)
-X <- GetAssayData(mobj, slot='data')[genes_use,]
-X <- t(X)
-
-# pairwise corr
-out <- qlcMatrix::corSparse(X)
-
-# flatten for plotting
-plot_df_mc <- reshape2::melt(out)
-plot_df_mc <- subset(plot_df_mc, Var1 != Var2)
-plot_df_mc$group <- 'ms'
-plot_df <- rbind(plot_df, plot_df_mc)
-
-plot_df <- plot_df[!is.nan(plot_df$value),]
-plot_df$group <- factor(as.character(plot_df$group), levels=c('st', 'ms'))
-
-
-p <- plot_df %>%
-  ggplot(aes(x=value, fill=group)) +
-#  geom_histogram(aes(y=..density..), position="identity", alpha=0.5)+
-  geom_density(alpha=0.6) +
-  geom_vline(xintercept=0, color='black', linetype='dashed') +
-  scale_fill_manual(values=c('grey', 'navy')) +
-  xlim(c(-1,1)) + theme(
+p <- ggplot(runtime_df, aes(x=sample, y=memory/1024)) +
+  geom_point(color = 'darkgoldenrod3') +
+  geom_line(color = 'darkgoldenrod3') +
+  #geom_smooth(method = 'lm') +
+  RotatedAxis() +
+  ylab('Memory upper bound (Gb)') +
+  xlab(expression(N[cells])) +
+  # scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
     panel.border = element_rect(size=1, fill=NA, color='black'),
     axis.line.x = element_blank(),
-    axis.line.y = element_blank()
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
   )
 
-pdf(paste0(fig_dir, 'mouse_correlation_hist.pdf'), width=5, height=2)
-p
+pdf(paste0(fig_dir, 'test_memory4.pdf'), width=5.5, height=3)
+p + facet_wrap(~func, ncol=3)
+# p + facet_wrap(~func, ncol=4, scales='free_y')
 dev.off()
+
+
+p <- ggplot(runtime_df, aes(x=sample, y=runtime / 60)) +
+  geom_point(color='hotpink3') +
+  geom_line(color='hotpink3') +
+  RotatedAxis() +
+  ylab('Runtime (minutes)') +
+  xlab(expression(N[cells])) +
+  #scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
+  )
+
+pdf(paste0(fig_dir, 'test_runtime4.pdf'), width=5.5, height=3)
+# p + facet_wrap(~func, ncol=4, scales='free_y')
+p + facet_wrap(~func, ncol=3, scales='free_y')
+dev.off()
+
+
+#########################################################
+# Plot the old vs new module connectivity 
+#######################################################
+
+
+rdf2 <- read.csv('data/runtime_summary2.csv')
+rdf3 <- read.csv('data/runtime_summary3.csv')
+
+runtime_df <- rbind(
+  subset(rdf2, func == 'ModuleConnectivity') %>% mutate(version = 'old'),
+  subset(rdf3, func == 'ModuleConnectivity') %>% mutate(version = 'new')
+)
+runtime_df <- runtime_df[,-1]
+
+
+p1 <- ggplot(runtime_df, aes(x=sample, y=memory/1024, color = version)) +
+  geom_point() +
+  geom_line() +
+  #geom_smooth(method = 'lm') +
+  RotatedAxis() +
+  ylab('Memory (Gb)') +
+  xlab(expression(N[cells])) +
+  # scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
+  )
+
+p2 <- ggplot(runtime_df, aes(x=sample, y=runtime / 60, color=version)) +
+  geom_point() +
+  geom_line() +
+  RotatedAxis() +
+  ylab('Runtime (minutes)') +
+  xlab(expression(N[cells])) +
+  #scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
+  )
+
+pdf(paste0(fig_dir, 'test_moduleconnectivity_compare.pdf'), width=5.5, height=3)
+# p + facet_wrap(~func, ncol=4, scales='free_y')
+(p1 | p2) + plot_layout(guides='collect')
+dev.off()
+
+
+
 
 
 ```
 
+Additional tests:
 
-
-hdWGCNA in cortical layers 2-6
+1. Test the runtime of MetacellsByGroups changing the number of target metacells
+2. Runtime of ModuleConnectivity with downsampling
+   1. RRHO or spearman correlation of the resulting kMEs
+3. Runtime of ConstructNetwork with different numbers of genes as input
 
 ```{r eval=FALSE}
 
-# load mouse vis
-seurat_mouse_vis <- readRDS('/dfs7/swaruplab/smorabit/analysis/scWGCNA/data/10x_mouse_brain_processed.rds')
-
-# add the cluster annotations
-annotations <- read.csv('~/swaruplab/smorabit/analysis/scWGCNA/data/10x_mouse_brain_annotations.csv')
-
-ix <- match(seurat_mouse_vis$seurat_clusters, annotations$seurat_clusters)
-seurat_mouse_vis$annotation <- annotations$annotation[ix]
-
-# subset just the cortical regions
-seurat_subset <- seurat_mouse_vis[,seurat_mouse_vis$annotation %in% c("Cortex L2/3", "Cortex L5", "Cortex L6")]
-
-seurat_subset <- SetupForWGCNA(
-  seurat_subset,
-  gene_select = "fraction",
-  fraction = 0.05,
-  wgcna_name = "cortex"
-)
-length(GetWGCNAGenes(seurat_subset))
-
-# construct metaspots
-seurat_subset$region <- factor(as.character(seurat_subset$region), levels=c('anterior', 'posterior'))
-seurat_subset <- MetaspotsByGroups(
-  seurat_subset,
-  group.by = c("region"),
-  mode = 'sum'
-)
-
-seurat_subset  <- NormalizeMetacells(seurat_subset )
-
-seurat_subset  <- SetDatExpr(
-  seurat_subset ,
-  group.by=NULL,
-  group_name = NULL,
-  use_metacells=TRUE,
-  slot = 'data',
-)
-
-seurat_subset <- TestSoftPowers(seurat_subset)
-
-# plot the results:
-plot_list <- PlotSoftPowers(seurat_subset)
-
-# assemble with patchwork
-pdf(paste0(fig_dir, 'mouse_vis_cortex_softpower.pdf'), width=12, height=8)
-wrap_plots(plot_list, ncol=2)
-dev.off()
-
-# construct wgcna network:
-seurat_subset <- ConstructNetwork(
-  seurat_subset, tom_name='mouse_vis_cortex', overwrite_tom=TRUE
-)
-
-# plot the dendrogram
-pdf(paste0(fig_dir, "mouse_vis_cortex_dendro.pdf"),height=3, width=6)
-PlotDendrogram(seurat_subset, main='hdWGCNA Dendrogram')
-dev.off()
-
-seurat_subset <- ModuleEigengenes(seurat_subset, exclude_grey=FALSE)
-seurat_subset <- ModuleConnectivity(seurat_subset)
-
 ################################################################################
-# Plot MEs
+# Test Metacells
 ################################################################################
 
-MEs <- GetMEs(seurat_subset)
-modules <- GetModules(seurat_subset)
-mods <- levels(modules$module)
-mods <- mods[mods!='grey']
-MEs <- MEs[,mods]
+target_metacells <- c(50, 100, 200, 500, 1000)
 
-seurat_subset@meta.data <- cbind(seurat_subset@meta.data, MEs)
+mcell_run_df <- data.frame()
 
-plot_list <- list()
-for(cur_mod in mods){
-  print(cur_mod)
-  p <- SampleFeaturePlot(
-    seurat_subset,
-    feature=cur_mod,
-    sample_col = "region",
-    ncol = 2,
-    raster=TRUE,
-    plot_max = 'q99',
-    plot_min = 0,
-    colfunc = inferno,
-    rev_colors=TRUE,
-    dpi=600,
+for(cur_target in target_metacells){
+  print(cur_target)
+  tt <- sum(.Internal(gc(FALSE, TRUE, TRUE))[13:14])
+  tic()
+  seurat_obj <- MetacellsByGroups(
+    seurat_obj,
+    group.by = c("cell_type", "Sample"),
+    k = 25,
+    max_shared = 12,
+    reduction = 'harmony',
+    ident.group = 'cell_type',
+    min_cells = 50,
+    target_metacells = cur_target
   )
-  plot_list[[cur_mod]] <- p
+  mcell_time <- toc()
+  mcell_mem <- sum(.Internal(gc(FALSE, FALSE, TRUE))[13:14]) - tt
+
+
+  cur_run_df <- data.frame(
+    'runtime' = as.numeric(mcell_time$toc - mcell_time$tic),
+    'memory' = mcell_mem,
+    'target' = cur_target,
+    'n_metacells' = ncol(GetMetacellObject(seurat_obj))
+  )
+
+  mcell_run_df <- rbind(mcell_run_df, cur_run_df)
+
+  seurat_obj <- SetMetacellObject(seurat_obj, NULL)
+  gc()
 
 }
 
-pdf(paste0(fig_dir, 'mouse_cortex_ME_spatial_featureplots/combined_featureplot.pdf'), width=8, height=8)
-wrap_plots(plot_list, ncol=2)
+
+
+
+write.csv(mcell_run_df, file='data/mcell_runtime_summary.csv')
+
+################################################################################
+# Plot runtime results
+################################################################################
+
+p <- ggplot(mcell_run_df, aes(x=target, y=memory/1024)) +
+  geom_point() +
+  geom_line() +
+  RotatedAxis() +
+  ylab('Memory upper bound (Gb)') +
+  xlab(expression(N[target])) +
+  scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9)
+  )
+
+pdf(paste0(fig_dir, 'test_memory_mcell.pdf'), width=2.5, height=3)
+p
+# p + facet_wrap(~func, ncol=4, scales='free_y')
 dev.off()
 
 
-seurat_subset@meta.data <- seurat_subset@meta.data[,colnames(seurat_subset@meta.data)[!colnames(seurat_subset@meta.data) %in% c(mods, 'grey')]]
 
+p <- ggplot(mcell_run_df, aes(x=target, y=runtime / 60)) +
+  geom_point() +
+  geom_line() +
+  RotatedAxis() +
+  ylab('Runtime (minutes)') +
+  xlab(expression(N[target])) +
+  scale_x_continuous(label=comma) +
+  theme(
+    panel.grid.major =element_line(color='lightgrey', size=0.5),
+    panel.border = element_rect(size=1, fill=NA, color='black'),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    strip.text.x = element_text(size=9),
+    axis.title.y = element_blank()
+  )
 
-################################################################################
-# change module colors
-################################################################################
-
-library(MetBrewer)
-
-modules <- GetModules(seurat_subset)
-mods <- levels(modules$module)
-mod_colors <- dplyr::select(modules, c(module, color)) %>%
-  distinct %>% arrange(module) %>% .$color
-n_colors <- length(mod_colors) -1
-
-modules$module <- ifelse(
-  is.na(as.character(modules$module)), 'grey',
-  as.character(modules$module)
-)
-modules$module <- as.factor(modules$module)
-modules[is.na(modules$module),'module'] <- 'grey'
-seurat_subset <- SetModules(seurat_subset, modules)
-
-new_colors <- paste0(met.brewer("Redon", n=n_colors, type='discrete'))
-seurat_subset <- ResetModuleColors(seurat_subset, new_colors)
-
-################################################################################
-# Hubgene circle plots:
-################################################################################
-
-library(igraph)
-
-# individual module networks
-ModuleNetworkPlot(
-  seurat_subset,
-  mods = "all",
-  outdir = paste0(fig_dir, 'mouse_vis_cortex_hubNetworks/')
-)
-
-
-################################################################################
-# UMAP:
-################################################################################
-
-seurat_subset <- RunModuleUMAP(
-  seurat_subset,
-  n_hubs = 6,
-  n_neighbors=25,
-  min_dist=0.1,
-  spread=1
-)
-
-# get the hub gene UMAP table from the seurat object
-umap_df <- GetModuleUMAP(
-  seurat_subset
-)
-
-# plot with ggplot
-p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
-  geom_point(
-   color=umap_df$color,
-   size=umap_df$kME*2
-  ) +
-  umap_theme()
-
-pdf(paste0(fig_dir, 'mouse_vis_cortex_hubgene_umap_ggplot_sup.pdf'), width=5, height=5)
+pdf(paste0(fig_dir, 'test_runtime_mcell.pdf'), width=2.5, height=2)
+# p + facet_wrap(~func, ncol=4, scales='free_y')
 p
 dev.off()
 
-
-
-# get the hub gene UMAP table from the seurat object
-umap_df <- GetModuleUMAP(seurat_subset)
-
-# plot with ggplot
-plot_df <- umap_df
-
-# compute coordinates for cluster labels
-centroid_df <- data.frame()
-for(cur_cluster in unique(plot_df[['module']])){
-  cur_meta <- plot_df[plot_df[['module']] == cur_cluster,]
-  df <- data.frame(
-    cluster = cur_cluster,
-    UMAP1 = mean(cur_meta$UMAP1),
-    UMAP2 = mean(cur_meta$UMAP2)
-  )
-  centroid_df <- rbind(centroid_df, df)
-}
-
-
-
-hub_genes <- GetHubGenes(seurat_subset, 3)
-
-
-# add annotation
-anno_genes <- hub_genes$gene_name
-plot_df$anno <- ifelse(plot_df$gene %in% anno_genes, umap_df$gene, '')
-
-
-
-plot_df_anno <- subset(plot_df, anno != '')
-p <-  plot_df %>%
-  ggplot(aes(x=UMAP1, y=UMAP2, color=module)) +
-  ggrastr::rasterise(
-    geom_point(
-      inherit.aes=FALSE,
-      data=plot_df,
-      aes(x=UMAP1, y=UMAP2, color=module),
-      color=plot_df$color,
-      size=plot_df$kME,
-    ), dpi=800, dpi_scale=0.5) +
-  geom_point(
-    inherit.aes = FALSE,
-    data = plot_df_anno,
-    shape=21, color='black',
-    fill=plot_df_anno$color,
-    size=plot_df_anno$kME,
-    aes(x=UMAP1, y=UMAP2, fill=module)
-  ) +
-  # add labels
-  ggrepel::geom_text_repel(data = centroid_df, label=centroid_df$cluster, color='black', max.overlaps=Inf, size=3, fontface='bold') +
-
-  geom_text_repel(label=plot_df$anno, max.overlaps=Inf, color='black', fontface='italic', size=2) +
-#  scale_color_manual(values=cp) +
-#  scale_fill_manual(values=cp) +
-  umap_theme() + NoLegend() +
-  coord_equal() +
-  theme(
-    plot.margin = margin(0,0,0,0)
-  )
-
-
-  pdf(paste0(fig_dir, 'mouse_vis_cortex_hubgene_umap_ggplot.pdf'), width=5, height=5)
-  print(p)
-  dev.off()
-
-
-library(reshape2)
-library(igraph)
-pdf(paste0(fig_dir, 'mouse_vis_cortex_hubgene_umap_igraph.pdf'), width=6, height=6)
-ModuleUMAPPlot(
-  seurat_subset,
-  edge.alpha=0.5,
-  sample_edges=TRUE,
-  keep_grey_edges=FALSE,
-  vertex.label.cex=0.25,
-  edge_prop=0.075,
-  label_hubs=5
-)
-dev.off()
-
-################################################################################
-# Enrichment analysis
-################################################################################
-
-library(enrichR)
-
-dbs <-c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021', 'WikiPathway_2021_Mouse', 'KEGG_2021_Mouse')
-
-# compute GO terms:
-seurat_subset <- RunEnrichr(seurat_subset, dbs=dbs)
-
-enrichr_df <- GetEnrichrTable(seurat_subset) %>% subset(P.value < 0.05)
-write.table(enrichr_df, quote=FALSE, sep='\t', row.names=FALSE, file=paste0(data_dir, 'mouse_vis_cortex_enrichr.tsv'))
-
-# make GO term plots:
-EnrichrBarPlot(
-  seurat_subset,
-  outdir = "figures/mouse_vis_cortex_enrichr_plots",
-  n_terms = 25, plot_size = c(4,16),
-  logscale=TRUE
-)
-
-# inspect the enrichr table:
-enrichr_df <- GetEnrichrTable(seurat_subset)
-
-# plot selected go terms:
-modules <- GetModules(seurat_subset)
-color_df <- modules %>% subset(module!='grey') %>%
-  select(c(module, color)) %>% distinct %>%
-  mutate(module=droplevels(module)) %>%
-  rename(c(group=module, colour=color))
-mods <- levels(modules$module); mods <- mods[mods != 'grey']
-mods <- paste0('Cortex-M', 1:7)
-
-color_df$group <- factor(as.character(color_df$group), levels=mods)
-
-# helper function to wrap text
-wrapText <- function(x, len) {
-    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
-}
-
-combined_output <- GetEnrichrTable(seurat_subset)
-selected_terms <- read.delim('data/mouse_vis_cortex_enrichr_selected.txt', sep='\t', header=1)
-
-# subset selected terms
-selected_terms <- subset(combined_output, Term %in% selected_terms$Term & P.value < 0.05)
-
-selected_terms$group <- factor(
-  as.character(selected_terms$module),
-  levels = mods
-)
-
-# set max pval
-
-quantile(-log(selected_terms$P.value), 0.95)
-max_p <- 10
-
-selected_terms$logp <- -log(selected_terms$P.value)
-selected_terms$logp <- ifelse(selected_terms$logp > max_p, max_p, selected_terms$logp)
-
-# remove GO Term ID
-selected_terms$Term <- str_replace(selected_terms$Term, " \\s*\\([^\\)]+\\)", "")
-
-selected_terms <- selected_terms %>%
-  arrange(group)
-
-
-selected_terms$wrap <- wrapText(selected_terms$Term, 35)
-
-selected_terms$Term <- factor(
-  as.character(selected_terms$Term),
-  levels = rev(unique(as.character(selected_terms$Term)))
-)
-
-# GO Term dot plot
-
-p <- selected_terms %>%
-  ggplot(aes(x = group, y = Term, color =logp, size=log(Combined.Score))) +
-  geom_point() +
-  scale_color_stepsn(colors=rev(magma(256))) +
-  RotatedAxis() + xlab('') + ylab('') +
-  theme(
-    axis.title.x = element_blank(),
-    axis.title.y = element_blank(),
-    panel.border = element_rect(size=1, color='black', fill=NA),
-    axis.line.x = element_blank(),
-    axis.line.y = element_blank(),
-    axis.text.x = element_blank(),
-    axis.ticks.x = element_blank(),
-    plot.margin = margin(0,0,0,0),
-    panel.grid = element_line(size=0.25, color='lightgrey')
-  )
-
-
-# make the colorbar as its own heatmap
-color_df$var <- 1
-cp <- color_df$colour; names(cp) <- color_df$group
-colorbar <- color_df %>%
-  ggplot(aes(x=group, y=var, fill=group)) +
-  geom_tile() +
-  scale_fill_manual(values=cp) +
-  coord_equal() +
-  NoLegend() + RotatedAxis() +
-  theme(
-    plot.title=element_blank(),
-    axis.line=element_blank(),
-    axis.ticks.y =element_blank(),
-    axis.text.y = element_blank(),
-    axis.title = element_blank(),
-    plot.margin=margin(0,0,0,0),
-  )
-
-
-
-
-pdf(paste0(fig_dir, 'mouse_vis_cortex_selected_GO_terms.pdf'), width=8.5, height=8)
-p / colorbar #+ plot_layout(heights=c(20,1))
-dev.off()
-
-
-plot_df <- selected_terms
-
-p <- plot_df  %>%
-  ggplot(aes(x=log(Combined.Score), y=reorder(wrap, Combined.Score), fill=module))+
-  geom_bar(stat='identity', position='identity', color='white') +
-  geom_text(aes(label=wrap), x=.1, color='black', size=3.5, hjust='left') +
-  scale_fill_manual(values=cp) +
-  ylab('Term') + xlab('log(Enrichment)') +
-  scale_x_continuous(expand = c(0, 0), limits = c(0, NA)) +
-  theme(
-    panel.grid.major=element_blank(),
-    panel.grid.minor=element_blank(),
-    legend.title = element_blank(),
-    axis.ticks.y=element_blank(),
-    axis.text.y=element_blank(),
-    axis.line.y=element_blank(),
-    plot.title = element_text(hjust = 0.5)
-  )
-
-pdf(paste0(fig_dir, 'mouse_vis_cortex_selected_GO_terms_bar.pdf'), width= 10, height=6 , useDingbats=FALSE)
-p + facet_wrap(~module, ncol=4, scales='free') + NoLegend()
-dev.off()
-
-saveRDS(seurat_subset, file='data/10x_mouse_cortex_hdWGCNA.rds')
 
 ```
