@@ -1,0 +1,575 @@
+
+
+```{r eval=FALSE}
+
+# load R packages
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix)
+library(viridis)
+library(harmony)
+library(RColorBrewer)
+library(patchwork)
+library(ggpubr)
+library(tictoc)
+library(RColorBrewer)
+library(Hmisc)
+library(corrplot)
+library(enrichR)
+library(GeneOverlap)
+library(WGCNA)
+enableWGCNAThreads(nThreads = 8)
+theme_set(theme_cowplot())
+
+# spatial plotting functions
+source('/dfs7/swaruplab/smorabit/analysis/scWGCNA/bin/spatial_functions.R')
+source("/pub/smorabit/hdWGCNA/bin/spatial_functions.R")
+
+
+
+setwd('/dfs7/swaruplab/smorabit/analysis/scWGCNA/t1d/')
+
+#devtools::install_github('smorabit/hdWGCNA', ref='dev')
+library(hdWGCNA)
+
+data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# re-load hdWGCNA dataset:
+
+seurat_obj <- readRDS(file=paste0(data_dir, 't1d_hdWGCNA_inprogress.rds'))
+
+
+```
+
+Load t1d dataset into R and make a Seurat object
+
+```{r eval=FALSE}
+
+indir <- 'data/'; data_dir <- 'data/'
+fig_dir <- 'figures/'
+
+# this won't work cause it needs to be transposed
+# X <- Matrix::readMM(paste0(indir,'DGE_1M_PBMC.mtx'))
+# cell_meta <- read.csv('data/cell_metadata_1M_PBMC.csv')
+# gene_meta <- read.csv('data/all_genes_1M_PBMC.csv')
+
+X <- Matrix::readMM(paste0(indir,'t1d_counts.mtx'))
+cell_meta <- read.table('data/t1d_processed_obs.csv', sep=',', header=TRUE, row.names=1)
+gene_meta <- read.table('data/t1d_processed_var.csv', sep=',', header=TRUE, row.names=1)
+
+X_harmony <- read.table(paste0(indir, 't1d_processed_harmony.csv'), sep=',', header=TRUE, row.names=1)
+
+
+
+# get the umap from cell_meta:
+umap <- cell_meta[,c('UMAP_1', 'UMAP_2')]
+
+# set the rownames and colnames for the expression matrix:
+# for Seurat, rows of X are genes, cols of X are cells
+colnames(X) <- rownames(cell_meta)
+rownames(X) <- rownames(gene_meta)
+rownames(X_harmony) <- rownames(cell_meta)
+rownames(umap) <- rownames(cell_meta)
+
+# create a Seruat object:
+seurat_obj <- Seurat::CreateSeuratObject(
+  counts = X,
+  meta.data = cell_meta,
+  assay = "RNA",
+  project = "t1d",
+  min.features = 0,
+  min.cells = 0
+)
+
+
+# set harmony
+seurat_obj@reductions$harmony <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(X_harmony),
+  key="PC",
+  assay="RNA"
+)
+
+# set UMAP
+seurat_obj@reductions$umap <- Seurat::CreateDimReducObject(
+  embeddings = as.matrix(umap),
+  key="UMAP",
+  assay="RNA"
+)
+
+# normalize
+seurat_obj <- NormalizeData(seurat_obj)
+
+VariableFeatures(seurat_obj) <- rownames(gene_meta)[gene_meta$highly_variable == 'True']
+
+
+# make a test plot of the umap:
+p1 <- DimPlot(seurat_obj, group.by='annotation', label=TRUE, pt.size=0.1) + NoLegend()
+pdf(paste0(fig_dir, 'umap_annotation_seurat.pdf'),  width=6, height=6, useDingbats=FALSE)
+p1
+dev.off()
+
+saveRDS(seurat_obj, file=paste0(data_dir, 't1d_processed.rds'))
+
+```
+
+Run hdWGCNA pipeline
+
+cell types with known T1D risk from Chiou et al 2021:
+
+* naive T
+* CD4 T
+* CD8 T
+* NK
+
+```{r eval=FALSE}
+
+seurat_obj$bc <- colnames(seurat_obj)
+stratified_sample <- seurat_obj@meta.data %>%
+  group_by(annotation) %>%
+  mutate(num_rows=n()) %>%
+  sample_frac(0.1, weight=num_rows) %>%
+  ungroup
+
+seurat_sampled <- seurat_obj[,stratified_sample$bc]
+
+seurat_sampled <- SetupForWGCNA(
+  seurat_sampled,
+  gene_select = 'fraction',
+  fraction = 0.05,
+  group.by = 'annotation',
+  wgcna_name = "test"
+)
+genes_use <- GetWGCNAGenes(seurat_sampled)
+
+
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  features = genes_use,
+  wgcna_name = "NK"
+)
+
+library(tictoc)
+
+tic()
+seurat_obj <- MetacellsByGroups(
+  seurat_obj = seurat_obj,
+  group.by = c("annotation", "sample"),
+  ident.group = 'annotation',
+  reduction = 'harmony',
+  k = 50,
+  max_shared=5,
+  target_metacells=250,
+  min_cells=50,
+  verbose=TRUE
+)
+timed <- toc()
+
+# 5159.835 sec elapsed
+
+saveRDS(seurat_obj, file=paste0(data_dir, 't1d_hdWGCNA_inprogress.rds'))
+
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+seurat_obj <- ScaleMetacells(seurat_obj, features=VariableFeatures(seurat_obj))
+seurat_obj <- RunPCAMetacells(seurat_obj, features=VariableFeatures(seurat_obj))
+seurat_obj <- RunHarmonyMetacells(seurat_obj, group.by.vars='sample')
+seurat_obj <- RunUMAPMetacells(seurat_obj, reduction='harmony', dims=1:15)
+
+p1 <- DimPlotMetacells(seurat_obj, group.by='annotation', label=TRUE) + umap_theme() + ggtitle("Cell Type")
+p2 <- DimPlotMetacells(seurat_obj, group.by='sample') + umap_theme() + ggtitle("Sample")
+
+#assemble with patchwork
+pdf(paste0(fig_dir, 'metacell_umap.pdf'), width=12, height=4)
+p1 + p2
+dev.off()
+
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group_name = c("CD4+ Naïve T", "CD4+ Memory T", 'NK', 'MAIT', 'Proliferating T', 'Treg', 'CD8+ Memory T', 'CD8+ Naïve T'),
+  group.by='annotation',
+  slot = 'data'
+)
+
+seurat_obj <- TestSoftPowers(
+  seurat_obj,
+  setDatExpr = FALSE
+)
+
+plot_list <- PlotSoftPowers(seurat_obj)
+
+
+#assemble with patchwork
+pdf(paste0(fig_dir, 't1d_softpower_T.pdf'), width=12, height=8)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+seurat_obj <- ConstructNetwork(seurat_obj, tom_name='T', overwrite_tom=TRUE)
+
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "t1d_T_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_obj, main='T1D T hdWGCNA Dendrogram')
+dev.off()
+
+
+dim(GetMetacellObject(seurat_obj))
+
+table(GetModules(seurat_obj)$module)
+
+seurat_obj <- ScaleData(seurat_obj, features= rownames(seurat_obj)[1:25])
+
+seurat_obj <- ModuleEigengenes(
+  seurat_obj,
+#  group.by.vars="sample", # snRNAseq batch
+  verbose=TRUE,
+  exclude_grey = TRUE
+)
+
+# downsample so I can run kME
+
+stratified_sample <- seurat_obj@meta.data %>%
+  group_by(annotation, Condition) %>%
+  mutate(num_rows=n()) %>%
+  sample_frac(0.1, weight=num_rows) %>%
+  ungroup
+seurat_obj$selected <- ifelse(seurat_obj$bc %in% stratified_sample$bc, 'Y', 'N')
+
+# compute module connectivity:
+seurat_obj <- ModuleConnectivity(
+  seurat_obj,
+  group.by='selected',
+  group_name = 'Y'
+)
+
+
+
+plot_list <- ModuleFeaturePlot(seurat_obj, order=TRUE, raster=TRUE, raster_dpi=400, alpha=1, restrict_range=FALSE, raster_scale=0.25)
+
+# remove the legend
+plot_list <- lapply(1:length(plot_list), function(x){
+  plot_list[[x]] + NoLegend() + theme(plot.title=element_text(face='plain', vjust=0.25), plot.margin=margin(c(0,0,0,0)))
+})
+
+
+pdf("figures/hME_featureplot_t1d.pdf",height=3, width=6)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+
+########################################
+# Dot Plot
+########################################
+
+
+MEs <- GetMEs(seurat_obj)
+MEs[MEs < 0] <- 0
+modules <- GetModules(seurat_obj)
+mods <- levels(modules$module)
+mods <- mods[mods!='grey']
+
+seurat_obj@meta.data <- cbind(seurat_obj@meta.data, MEs)
+
+
+# make dotplot
+p <- DotPlot(
+  seurat_obj,
+  group.by='annotation',
+  features = rev(mods)
+) + coord_flip() + RotatedAxis() +
+  scale_color_gradient2(high='red', mid='grey95', low='blue') + xlab('') + ylab('') +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=1)
+  )
+
+pdf(paste0(fig_dir, 'hMEs_dotplot.pdf'), width=9, height=5)
+p
+dev.off()
+
+# remove from seurat obj
+#seurat_obj@meta.data <- cbind(seurat_obj@meta.data, MEs)
+
+seurat_obj@meta.data <- seurat_obj@meta.data[,!(colnames(seurat_obj@meta.data) %in% colnames(MEs))]
+
+saveRDS(seurat_obj, file=paste0(data_dir, 't1d_hdWGCNA_hdWGCNA.rds'))
+
+
+
+```
+
+
+Running hdWGCNA subsetting each major cell group
+
+```{r eval=FALSE}
+
+
+p <- PlotEmbedding(
+  seurat_obj,
+  group.by = 'annotation',
+  raster_dpi = 600,
+  raster_scale=0.25, point_size=0.5,
+  plot_theme = umap_theme(),
+  plot_under=TRUE
+)
+
+pdf(paste0(fig_dir, 'umap_annotation_R.pdf'), width=8, height=8)
+p
+dev.off()
+
+
+# dendritic cells
+cur_group <- 'DC'
+selected_groups <- c('cDC', 'pDC')
+sample_prop <- 0.25
+gene_frac <- 0.05
+
+# Plasmablast cells
+cur_group <- 'Plasmablast'
+selected_groups <- 'Plasmablast'
+sample_prop <- 0.75
+gene_frac <- 0.05
+
+# B cells
+cur_group <- 'B'
+selected_groups <- c("Memory B", "Naïve B")
+sample_prop <- 0.25
+gene_frac <- 0.05
+
+# monocytes
+cur_group <- 'Monocytes'
+selected_groups <- c('CD14+ Monocytes', 'CD16+ Monocytes')
+sample_prop <- 0.10
+gene_frac <- 0.05
+
+cur_group <- 'T'
+selected_groups <- c("CD4+ Naïve T", "CD4+ Memory T", 'NK', 'MAIT', 'Proliferating T', 'Treg', 'CD8+ Memory T', 'CD8+ Naïve T')
+sample_prop <- 0.10
+gene_frac <- 0.05
+
+
+
+# get metacells
+metacell_obj <- GetMetacellObject(seurat_obj) %>% subset(annotation %in% selected_groups)
+seurat_subset <- seurat_obj %>% subset(annotation %in% selected_groups)
+dim(seurat_subset)
+
+# re-load processed subset
+seurat_subset <- readRDS(file=paste0(data_dir, 't1d_hdWGCNA', cur_group,'.rds'))
+
+# run UMAP on this data:
+seurat_subset <- RunUMAP(seurat_subset, reduction='harmony', dims=1:30, metric='cosine')
+
+p <- PlotEmbedding(
+  seurat_subset,
+  group.by = 'annotation',
+  raster_dpi = 600,
+  raster_scale=0.5, point_size=1,
+  plot_theme = umap_theme(),
+  plot_under=TRUE
+)
+
+pdf(paste0(fig_dir, 'umap_', cur_group,'.pdf'), width=5, height=5)
+p
+dev.off()
+
+
+# get the genes
+seurat_subset$bc <- colnames(seurat_subset)
+stratified_sample <- seurat_subset@meta.data %>%
+  group_by(annotation) %>%
+  mutate(num_rows=n()) %>%
+  sample_frac(sample_prop, weight=num_rows) %>%
+  ungroup
+
+seurat_sampled <- seurat_subset[,stratified_sample$bc]
+
+
+seurat_sampled <- SetupForWGCNA(
+  seurat_sampled,
+  gene_select = 'fraction',
+  fraction = gene_frac,
+  group.by = 'annotation',
+  wgcna_name = "test"
+)
+genes_use <- GetWGCNAGenes(seurat_sampled)
+length(genes_use)
+
+
+
+seurat_subset <- SetupForWGCNA(
+  seurat_subset,
+  features = genes_use,
+  wgcna_name = cur_group
+)
+
+seurat_subset <- SetMetacellObject(seurat_subset, metacell_obj)
+
+
+seurat_subset <- SetDatExpr(
+  seurat_subset,
+  group_name = unique(seurat_subset$annotation),
+  group.by='annotation',
+  slot = 'data'
+)
+
+seurat_subset <- TestSoftPowers(
+  seurat_subset,
+  setDatExpr = FALSE
+)
+
+plot_list <- PlotSoftPowers(seurat_subset)
+
+
+#assemble with patchwork
+pdf(paste0(fig_dir, 't1d_softpower_', cur_group,'.pdf'), width=12, height=8)
+wrap_plots(plot_list, ncol=2)
+dev.off()
+
+tic()
+seurat_subset <- ConstructNetwork(
+  seurat_subset,
+  tom_name=cur_group,
+  overwrite_tom=TRUE
+)
+time <- toc()
+
+# 185.869 sec elapsed (T-cells)
+
+# plot the dendrogram
+pdf(paste0(fig_dir, "t1d_", cur_group,"_dendro.pdf"),height=3, width=6)
+PlotDendrogram(seurat_subset, main=paste0(cur_group, ' dendro'))
+dev.off()
+
+
+dim(GetMetacellObject(seurat_subset))
+
+table(GetModules(seurat_subset)$module)
+
+seurat_subset <- ScaleData(seurat_subset, features= rownames(seurat_subset)[1:25])
+
+seurat_subset <- ModuleEigengenes(
+  seurat_subset,
+#  group.by.vars="sample", # snRNAseq batch
+  verbose=TRUE,
+  exclude_grey = FALSE
+)
+
+# downsample so I can run kME
+
+stratified_sample <- seurat_subset@meta.data %>%
+  group_by(annotation, Condition) %>%
+  mutate(num_rows=n()) %>%
+  sample_frac(sample_prop, weight=num_rows) %>%
+  ungroup
+seurat_subset$selected <- ifelse(seurat_subset$bc %in% stratified_sample$bc, 'Y', 'N')
+
+# compute module connectivity:
+seurat_subset <- ModuleConnectivity(
+  seurat_subset,
+  group.by='selected',
+  group_name = 'Y'
+)
+
+# run RenameModules
+seurat_subset <- ResetModuleNames(
+  seurat_subset,
+  new_name = paste0(cur_group,"-M")
+)
+print(names(GetModules(seurat_subset)))
+
+
+plot_list <- ModuleFeaturePlot(seurat_subset, order=TRUE, raster=TRUE, raster_dpi=400, alpha=1, restrict_range=FALSE, raster_scale=0.25)
+
+# remove the legend
+plot_list <- lapply(1:length(plot_list), function(x){
+  plot_list[[x]] + NoLegend() + theme(plot.title=element_text(face='plain', vjust=0.25), plot.margin=margin(c(0,0,0,0)))
+})
+
+
+pdf(paste0("figures/hME_featureplot_t1d_", cur_group, ".pdf"),height=4, width=8)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+# individual module networks
+ModuleNetworkPlot(
+  seurat_subset,
+  mods = "all",
+  outdir = paste0(fig_dir, cur_group,'_hubNetworks/')
+)
+
+
+
+seurat_subset <- RunModuleUMAP(
+  seurat_subset,
+  n_hubs = 7,
+  n_neighbors=25,
+  min_dist=0.3,
+  spread=2
+)
+
+# get the hub gene UMAP table from the seurat object
+umap_df <- GetModuleUMAP(
+  seurat_subset
+)
+
+# plot with ggplot
+p <- ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(
+   color=umap_df$color,
+   size=umap_df$kME*2
+  ) +
+  umap_theme()
+
+pdf(paste0(fig_dir, cur_group,'_hubgene_umap_ggplot_uns.pdf'), width=5, height=5)
+p
+dev.off()
+
+library(reshape2)
+library(igraph)
+pdf(paste0(fig_dir, cur_group, '_hubgene_umap_igraph.pdf'), width=7, height=7)
+ModuleUMAPPlot(
+  seurat_subset,
+  edge.alpha=0.5,
+  sample_edges=TRUE,
+  keep_grey_edges=FALSE,
+  edge_prop=0.075, # taking the top 20% strongest edges in each module
+  #label_genes = label_genes,
+  label_hubs=0 # how many hub genes to plot per module?
+)
+dev.off()
+
+
+saveRDS(seurat_subset, file=paste0(data_dir, 't1d_hdWGCNA', cur_group,'.rds'))
+
+
+```
+
+
+Get module assignments from each subset
+
+```{r eval=FALSE}
+
+groups <- c('DC', 'Plasmablast', 'B', 'Monocytes', 'T')
+
+module_list <- list()
+for(cur_group in groups){
+  print(cur_group)
+  seurat_subset <- readRDS(file=paste0(data_dir, 't1d_hdWGCNA', cur_group,'.rds'))
+  modules <- GetModules(seurat_subset)
+  modules$group <- cur_group
+  modules <- modules %>% dplyr::select(c(gene_name, module, color, group))
+  module_list[[cur_group]] <- modules
+}
+
+modules <- do.call(rbind, module_list)
+modules <- subset(modules, module != 'grey')
+
+write.csv(modules, row.names=FALSE, quote=FALSE, file=paste0(data_dir, 't1d_modules.csv'))
+
+```
